@@ -37,6 +37,9 @@ _HTML = r"""<!doctype html>
     --ok: #4ade80; --warn: #facc15; --bad: #f87171;
   }
   * { box-sizing: border-box; }
+  /* hidden 属性必须赢过任何作者 display 规则——否则 .kpi .stale 的 display:block
+     会让"守护已停止"红字一旦闪现就永久粘在界面（2026-09-28 实测） */
+  [hidden] { display: none !important; }
   html, body { height: 100%; }
   body { margin:0; font: 14px/1.6 "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
          background: var(--bg); color: var(--txt); display: flex; overflow: hidden;
@@ -214,7 +217,6 @@ _HTML = r"""<!doctype html>
 
         <div class="sec"><span class="t">系统</span><span class="ln"></span>
           <button class="small primary" onclick="toggleGuardBtn(this)">开启保护</button>
-          <button class="small" onclick="act('test')">测试链路</button>
         </div>
         <div class="kpis">
           <div class="kpi"><span class="k">保护状态</span><span class="v"><b id="prot" class="badge b-disarm">…</b></span><span class="n" id="prot-reason"></span><span class="stale" id="prot-stale" hidden>守护已停止，状态已失效</span></div>
@@ -235,8 +237,7 @@ _HTML = r"""<!doctype html>
       <!-- ===== 事件 ===== -->
       <section class="page" id="p-events">
         <h2 class="ph">事件时间线</h2>
-        <div class="pd">关键节点记录（任务开始/结束、保护动作、hooks 修复）· 最新在上 · hook 只在节点响，任务跑很久中间静默是正常的
-          <button class="small" onclick="act('test')">喂测试事件</button></div>
+        <div class="pd">关键节点记录（任务开始/结束、保护动作、hooks 修复）· 最新在上 · hook 只在节点响，任务跑很久中间静默是正常的</div>
         <table id="events"><thead><tr><th style="width:105px">时间</th><th style="width:130px">事件</th><th>会话 / 项目</th></tr></thead>
           <tbody></tbody></table>
       </section>
@@ -485,7 +486,9 @@ function renderEvents(s) {
 function renderAgents(s) {
   const liveSet = new Set((s.live_sessions||[]).map(x => x.session_id));
   const rest = (s.agents||[]).filter(a => !liveSet.has(a.session_id));
-  const rank = a => (a.state==='RUNNING' ? 0 : a.state==='FINISHED' ? 1 : 2);
+  // 排序（2026-09-28 合理化）：RUNNING 在前；其余终态（FINISHED/STOPPED）合为一组
+  // 纯按时间倒序——终态之间不该再分尊卑（老的 FINISHED 压过新的 STOPPED 很怪）
+  const rank = a => (a.state==='RUNNING' ? 0 : 1);
   rest.sort((a,b) => rank(a)-rank(b) || ((b.updated_ts||0)-(a.updated_ts||0)));
   $('agents').tBodies[0].innerHTML = rest.map(a => {
     const sub = a.substate ? '/' + a.substate : '';
@@ -637,12 +640,6 @@ class _Handler(BaseHTTPRequestHandler):
                 + json.dumps(_collect_state(self.store), ensure_ascii=False, indent=1),
                 encoding="utf-8")
             self._json({"ok": True, "path": str(f)})
-        elif self.path == "/api/test-event":
-            self.store.record_agent_event(
-                source="manual", event="UserPromptSubmit",
-                session_id="ui-selftest", cwd="test from ui",
-            )
-            self._json({"ok": True})
         elif self.path == "/api/protect":
             # 只写意图，daemon（唯一裁判）两拍内跟随——与托盘一致，避免双路径状态分叉
             self.store.set_protection("ARMED", reason="user arm (ui)")

@@ -119,11 +119,7 @@
 用户要求全盘审计"任务计划程序"后清理。21 个非 Microsoft 任务审计：12 个在役保留（ARM×2、Aily CLI、Chrome×3、OneDrive×3、WPS×3、系统 Feed 同步），其余处置如下：
 
 - ✔️ **已删（普通权限即删成）**：`BlueStacksHelper_nxt`（蓝叠模拟器已卸载，exe 已不存在）、`QuarkUpdaterTaskUser1.0.0.21{...}`（夸克更新器 exe 已不存在）、`SoftLanding\...` ×3（微软推广/广告任务；注：系统大更新可能带回来，对账时复查）
-- ⏳ **待管理员执行**（"飞快"软件已卸载的 3 个僵尸任务，普通权限拒绝访问）：
-
-  ```powershell
-  Unregister-ScheduledTask -TaskName 'runFeikuaFirewallSetup','startFeikuaMemreduct','startFeikuaUpdate' -Confirm:$false
-  ```
+- ✔️ **已删**：`runFeikuaFirewallSetup`、`startFeikuaMemreduct`、`startFeikuaUpdate`（"飞快"软件已卸载的僵尸任务；管理员权限安装的任务普通权限删不掉，用户已在管理员终端执行，2026-09-28 核实不存在）。至此本节 8 项清理全部完成，非系统任务 21 → 13。
 
 - **经验**：`Unregister-ScheduledTask` 普通权限即可删"当前用户级"任务（SoftLanding/Quark/BlueStacks 实测可删）；管理员/提权安装的软件注册的任务才需要管理员终端。
 
