@@ -69,6 +69,7 @@
 - **删除**：`uv tool uninstall agent-runtime-manager`（入口 exe 一并删）
 - **坑**：重装前必须先停掉所有 ARM 进程（daemon 锁会锁死 arm.exe 导致装一半残废）。
 - **操作记录**：2026-09-28 UI 按钮修复（1e42e4f）后重装：停 pythonw → `uv tool install --force` → `schtasks /Run ARM-App` 重启。注：任务管理器常看到两个 pythonw（一大一小）**不是残留**——小的是 uv venv trampoline 空壳，大的是实际解释器进程，父子关系属 uv tool 正常进程树。
+- **操作记录**：2026-09-28 移除概览页冗余保护按钮（365bda6）后再次重装重启，流程同上。
 
 ### 5. ~/.arm 数据目录
 
