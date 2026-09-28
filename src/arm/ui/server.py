@@ -216,7 +216,7 @@ _HTML = r"""<!doctype html>
         <div class="acards" id="hero"></div>
 
         <div class="sec"><span class="t">系统</span><span class="ln"></span>
-          <button class="small primary" onclick="toggleGuardBtn(this)">开启保护</button>
+          <button id="sys-guard" class="small primary" onclick="toggleGuard()">开启保护</button>
         </div>
         <div class="kpis">
           <div class="kpi"><span class="k">保护状态</span><span class="v"><b id="prot" class="badge b-disarm">…</b></span><span class="n" id="prot-reason"></span><span class="stale" id="prot-stale" hidden>守护已停止，状态已失效</span></div>
@@ -472,6 +472,7 @@ function renderStrip(s) {
     gb.textContent = protecting ? '释放保护' : '开启保护';
     gb.dataset.mode = protecting ? 'on' : 'off';
   }
+  $('sys-guard').textContent = gb.textContent;
 }
 function toggleGuard() {
   const m = $('guard-btn').dataset.mode;
