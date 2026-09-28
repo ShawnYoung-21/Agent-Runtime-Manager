@@ -215,9 +215,7 @@ _HTML = r"""<!doctype html>
         <div class="pd">干活中的亮灯呼吸 · 会话窗口开着 ≠ 在跑任务（90 秒无活动视为本轮结束）· "开启保护"=布防，任务干活自动升级为保护</div>
         <div class="acards" id="hero"></div>
 
-        <div class="sec"><span class="t">系统</span><span class="ln"></span>
-          <button id="sys-guard" class="small primary" onclick="toggleGuard()">开启保护</button>
-        </div>
+        <div class="sec"><span class="t">系统</span><span class="ln"></span></div>
         <div class="kpis">
           <div class="kpi"><span class="k">保护状态</span><span class="v"><b id="prot" class="badge b-disarm">…</b></span><span class="n" id="prot-reason"></span><span class="stale" id="prot-stale" hidden>守护已停止，状态已失效</span></div>
           <div class="kpi"><span class="k">daemon 心跳</span><span class="v"><b id="hb" class="badge b-dead">…</b></span><span class="n" id="hb-note"></span></div>
@@ -472,7 +470,6 @@ function renderStrip(s) {
     gb.textContent = protecting ? '释放保护' : '开启保护';
     gb.dataset.mode = protecting ? 'on' : 'off';
   }
-  $('sys-guard').textContent = gb.textContent;
 }
 function toggleGuard() {
   const m = $('guard-btn').dataset.mode;
