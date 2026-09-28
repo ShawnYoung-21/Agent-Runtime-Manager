@@ -68,6 +68,7 @@
 - **查证**：`uv tool list`
 - **删除**：`uv tool uninstall agent-runtime-manager`（入口 exe 一并删）
 - **坑**：重装前必须先停掉所有 ARM 进程（daemon 锁会锁死 arm.exe 导致装一半残废）。
+- **操作记录**：2026-09-28 UI 按钮修复（1e42e4f）后重装：停双 pythonw（其中 15612 为旧入口残留）→ `uv tool install --force` → `schtasks /Run ARM-App` 重启。
 
 ### 5. ~/.arm 数据目录
 
