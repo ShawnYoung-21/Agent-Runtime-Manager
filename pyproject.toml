@@ -1,6 +1,6 @@
 [project]
 name = "agent-runtime-manager"
-version = "0.1.0"
+version = "1.0.0"
 description = "面向本地 AI Agent 的 CLI First 运行管理层：根据 Agent 生命周期智能管理运行环境"
 readme = "README.md"
 requires-python = ">=3.11"
