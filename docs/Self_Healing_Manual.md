@@ -87,7 +87,7 @@ app 硬死 = 引擎同死，进程内互护（_app_watchdog/_ensure_daemon）全
 ## 六、ARM-Watchdog 注册（管理员 PowerShell，一次性）
 
 ```powershell
-$action = New-ScheduledTaskAction -Execute "C:\Users\yangchaoxin\AppData\Roaming\uv\tools\agent-runtime-manager\Scripts\pythonw.exe" -Argument "-m arm.cli watchdog"
+$action = New-ScheduledTaskAction -Execute "%USERPROFILE%\AppData\Roaming\uv\tools\agent-runtime-manager\Scripts\pythonw.exe" -Argument "-m arm.cli watchdog"
 $t1 = New-ScheduledTaskTrigger -AtLogOn
 $t2 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
 Register-ScheduledTask -TaskName "ARM-Watchdog" -Action $action -Trigger $t1,$t2 -Description "ARM 全死复活看门狗（app 进程消失且心跳过期时拉起）"

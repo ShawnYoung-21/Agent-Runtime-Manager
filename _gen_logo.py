@@ -10,7 +10,7 @@
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
-OUT = Path(r"C:\Users\yangchaoxin\Desktop\Agent Runtime Manager\assets")
+OUT = Path(__file__).resolve().parent / "assets"
 OUT.mkdir(exist_ok=True)
 
 # 品牌色

@@ -27,7 +27,7 @@ from typing import Optional
 @dataclass(frozen=True)
 class TranscriptInfo:
     session_id: str          # jsonl 文件名（去 .jsonl）
-    project_dir: str         # 项目目录转义名（如 C--Users-yangchaoxin-Desktop-Agent-...）
+    project_dir: str         # 项目目录转义名（如 C--Users-<user>-Desktop-Agent-...）
     project_path: str        # 反解出的真实项目路径（尽力）
     mtime: float             # 文件修改时间（unix）
     last_msg_ts: Optional[str]  # 末条消息的 timestamp 原文（UTC ISO），解析失败为 None
@@ -38,7 +38,7 @@ def transcripts_root() -> Path:
 
 
 def _decode_project_dir(name: str) -> str:
-    """把 'C--Users-yangchaoxin-Desktop-Agent-Runtime-Manager' 反解为近似显示路径。
+    """把 'C--Users-<user>-Desktop-Agent-Runtime-Manager' 反解为近似显示路径。
 
     Claude Code 的编码规则：'\\' → '--'，'-'(原名中的连字符) → '-'。
     反解：先按 '--' 分隔（那是原来的路径分隔符），段内 '-' 保持原样。
@@ -48,7 +48,7 @@ def _decode_project_dir(name: str) -> str:
         return name
     parts = name.split("--")
     if len(parts) >= 2 and parts[0].isalpha() and len(parts[0]) == 1:
-        # 盘符形式：C -- Users-yangchaoxin-Desktop-Agent-Runtime-Manager
+        # 盘符形式：C -- Users-<user>-Desktop-Agent-Runtime-Manager
         rest = "\\".join(parts[1:])
         return f"{parts[0]}:\\{rest}"
     return name.replace("-", "\\")

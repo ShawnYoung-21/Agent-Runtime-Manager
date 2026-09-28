@@ -46,7 +46,7 @@
 - **删了会怎样**：ARM 崩溃后不会自动复活（自愈能力降级，其余功能不受影响）。
 - **注册命令**（万一要重建，管理员 PowerShell）：
   ```powershell
-  $action = New-ScheduledTaskAction -Execute "C:\Users\yangchaoxin\AppData\Roaming\uv\tools\agent-runtime-manager\Scripts\pythonw.exe" -Argument "-m arm.cli watchdog"
+  $action = New-ScheduledTaskAction -Execute "%USERPROFILE%\AppData\Roaming\uv\tools\agent-runtime-manager\Scripts\pythonw.exe" -Argument "-m arm.cli watchdog"
   $t1 = New-ScheduledTaskTrigger -AtLogOn
   $t2 = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
   Register-ScheduledTask -TaskName "ARM-Watchdog" -Action $action -Trigger $t1,$t2 -Description "ARM 全死复活看门狗"
