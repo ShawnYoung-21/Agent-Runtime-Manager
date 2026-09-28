@@ -197,7 +197,7 @@ _HTML = r"""<!doctype html>
     </nav>
     <div class="foot">
       <button id="guard-btn" class="guard-btn guard-off" onclick="toggleGuard()">开启保护</button>
-      <div class="foot" style="margin-top:8px" >daemon 自启 · hooks 自愈</div>
+      <div class="foot" style="margin-top:8px" >开机自启 · 全程自愈</div>
     </div>
   </aside>
 
@@ -267,9 +267,11 @@ _HTML = r"""<!doctype html>
         <div class="card">
           <b>它自动做的事</b>
           <ul style="margin:8px 0; padding-left:20px; font-size:13.5px;">
-            <li>开机自启守护（daemon），无需手动开启</li>
-            <li>Claude 干活 → 自动保护；结束 → 自动释放</li>
+            <li>开机登录即启动、即执勤——无需手动开启任何东西</li>
+            <li>Claude / Codex 干活 → 自动保护（合盖+电池也全速）；结束 → 自动释放</li>
+            <li>应用崩溃 → 系统级看门狗 5 分钟内自动拉起</li>
             <li>hooks 被其它工具冲掉 → 60 秒内自动修复</li>
+            <li>退出 ARM = 一切恢复原样（电源键、睡眠、电源设置）</li>
           </ul>
           <b>支持的 Agent</b>
           <ul style="margin:8px 0; padding-left:20px; font-size:13.5px;">
@@ -282,6 +284,8 @@ _HTML = r"""<!doctype html>
         </div>
         <h2 class="ph" style="margin-top:18px;">概念词典</h2>
         <dl class="vocab">
+          <dt>二态模型（最重要）</dt>
+          <dd>ARM 的开关就是应用本身：<b>在托盘里 = 全职保镖</b>（自动检测任务、自动保护、电源键防误按）；<b>退出 = 一切休息</b>（电源、按键、睡眠全部恢复原样）。没有别的开关要记。</dd>
           <dt>待机 S0（Modern Standby）</dt>
           <dd>Win11 的"假睡"：合盖后屏幕黑了，但系统会把前台进程降权甚至冻结——这就是"合盖任务卡住"的根源。arm 用电源保活对抗它。</dd>
           <dt>PROTECTING / ARMED / DISARMED</dt>
@@ -298,6 +302,10 @@ _HTML = r"""<!doctype html>
           <dd>会话崩了没发退出信号。daemon 自动回收（30 分钟无活动）。</dd>
           <dt>transcript 旁路</dt>
           <dd>arm 直接读 Claude 会话记录文件判忙闲——hooks 丢了它也在。</dd>
+          <dt>hooks（生命周期钩子）</dt>
+          <dd>arm 往 Claude 配置里注入的 4 个通知器：会话开始/你发消息/一轮答完/会话退出，各上报一次。被第三方工具冲掉会 60 秒内自动修复，不用管。</dd>
+          <dt>会话状态（RUNNING / FINISHED / STOPPED）</dt>
+          <dd>RUNNING=会话活着；FINISHED=正常结束；STOPPED=被回收（含"你离开超 30 分钟"的情况——回来继续聊就行，不影响保护，只是列表里的状态字样）。</dd>
           <dt>两个静默阈值（90 秒 / 120 秒）</dt>
           <dd>90 秒管"屏幕上显示忙不忙"（呼吸灯），120 秒管"什么时候判任务结束并释放保护"。显示先变闲、保护稍后松手，是设计不是卡了。</dd>
           <dt>电源键（ARM 运行期间）</dt>
