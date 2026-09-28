@@ -301,6 +301,10 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
     for idx, r in enumerate(cat_rows):
         ts = r.get("source_updated_at") or 0
         silence = max(0.0, now - ts)
+        # 显示用"最后活动"：catalog 心跳是分钟级滞后，运行时 WAL 才是秒级实时——
+        # 忙碌归因本就依赖 WAL，显示口径与归因保持一致（取两者较新的活动），
+        # 否则任务跑着 UI 却显示"20 分钟前活动"（2026-09-28 用户实测反馈）
+        display_silence = min(silence, rt_age) if rt_age is not None else silence
         # 忙 = 运行时 WAL 活跃 且 该会话是最近目录项（WAL 不区分会话，最近项即活跃项）
         busy = rt_live and idx == 0
         out[r["thread_id"]] = {
@@ -310,7 +314,7 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
             "source_kind": r.get("source_kind"),
             "git_branch": r.get("git_branch"),
             "busy": busy,
-            "silence_s": round(silence, 1),
+            "silence_s": round(display_silence, 1),
             "runtime_age_s": round(rt_age, 1) if rt_age is not None else None,
             "last_activity": ts,
             "src": "sqlite",
