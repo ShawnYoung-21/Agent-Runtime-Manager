@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# uv / venv
+.venv/
+
+# pytest 临时目录
+.pytest_tmp/
+.pytest_tmp_auto/
+.pytest_cache/
+
+# arm 运行数据（本地）
+.arm/
+.claude/settings.local.json
