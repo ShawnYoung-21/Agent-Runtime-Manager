@@ -221,6 +221,52 @@ def runtime_activity_age() -> Optional[float]:
     return max(0.0, time.time() - newest)
 
 
+_turn_cache: dict[str, object] = {"at": 0.0, "data": None}
+
+
+def read_runtime_turn_activity(max_age_s: float = 180.0) -> dict[str, float]:
+    """读 ~/.codex/logs_2.sqlite 最近的 turn 执行跨度 → {thread_id: 最近活动 epoch}。
+
+    第三路独立证据（2026-09-29）：任务执行时 logs_2 秒级流式出现
+    ``session_task.turn`` 跨度行（带 thread_id=uuid），空闲即消失——
+    与 rollout 文件、catalog 心跳互不依赖，防任一单点失效。
+    只读连接（WAL 并发读安全，logs_2 大，不做复制）；失败返回上次缓存或 {}。
+    """
+    import re
+    import sqlite3
+
+    p = sessions_root().parent / "logs_2.sqlite"
+    if not p.exists():
+        return {}
+    now = time.time()
+    cached = _turn_cache.get("data")
+    if cached is not None and now - float(_turn_cache.get("at", 0.0)) < 2.0:
+        return dict(cached)  # type: ignore[arg-type]
+    out: dict[str, float] = {}
+    pat = re.compile(r"thread_id=([0-9a-fA-F-]{36})")
+    try:
+        conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True,
+                               timeout=1.0)
+        rows = conn.execute(
+            "SELECT ts, feedback_log_body FROM logs ORDER BY id DESC LIMIT 400"
+        ).fetchall()
+        conn.close()
+        for ts, body in rows:
+            if ts < now - max_age_s:
+                break
+            if not body or "session_task.turn" not in body:
+                continue
+            m = pat.search(body)
+            if m:
+                tid = m.group(1).lower()
+                if tid not in out or ts > out[tid]:
+                    out[tid] = float(ts)
+    except Exception:
+        return dict(cached) if isinstance(cached, dict) else {}
+    _turn_cache.update(at=now, data=out)
+    return out
+
+
 def read_sqlite_catalog() -> list[dict]:
     """读 ~/.codex/sqlite/codex-dev.db 的 local_thread_catalog（新版桌面/VSCode 会话）。
 
@@ -389,29 +435,36 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
     out: dict[str, dict] = {}
 
     # 源 A：sqlite 目录（新版桌面/VSCode）
-    # 仅使用会话自身 source_updated_at 与 timeline 终态。运行时 WAL 是全局
-    # app-server 心跳，不能再用 idx==0 把它归因给最新会话。
+    # 判定优先级（2026-09-29 定版）：热 rollout > catalog 自身静默 > timeline 终态
+    # > runtime turn 跨度（第三路独立证据，防 rollout/catalog 单点失效）。
+    # 全局 WAL/常驻进程不得归因给具体会话。
     timeline = read_sqlite_timeline()
+    turns = read_runtime_turn_activity()
     rt_age = runtime_activity_age()
     cat_rows = read_sqlite_catalog()
     for r in cat_rows:
         ts = r.get("source_updated_at") or 0
         silence = max(0.0, now - ts)
-        terminal = timeline.get(r["thread_id"])
+        tid = r["thread_id"]
+        terminal = timeline.get(tid)
         if terminal is not None and terminal.get("state") == "finished":
             busy = False
             activity_source = "timeline"
             finish_reason = terminal.get("reason")
-        elif terminal is not None and terminal.get("state") == "running":
-            busy = silence < finish_silence_s
-            activity_source = "timeline+catalog"
-            finish_reason = None if busy else "timeline 活跃但自身静默超时"
         else:
             busy = silence < finish_silence_s
             activity_source = "catalog"
             finish_reason = None if busy else "source_updated_at 静默超时"
-        out[r["thread_id"]] = {
-            "session_id": r["thread_id"],
+        turn_ts = turns.get(tid)
+        if turn_ts is not None and (now - turn_ts) < finish_silence_s:
+            # turn 跨度在窗口内 = 任务此刻真在执行（覆盖 timeline 终态与 catalog 判闲：
+            # 终态后新回合、catalog 轮次边界心跳失灵，都以实时跨度为准——宁误保护）
+            busy = True
+            silence = min(silence, now - turn_ts)
+            activity_source = "runtime_turn"
+            finish_reason = None
+        out[tid] = {
+            "session_id": tid,
             "title": r.get("title"),
             "cwd": r.get("cwd"),
             "source_kind": r.get("source_kind"),
@@ -421,6 +474,19 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
             "last_activity": ts,
             "activity_source": activity_source,
             "finish_reason": finish_reason,
+            "runtime_age_s": round(rt_age, 1) if rt_age is not None else None,
+            "src": "sqlite",
+        }
+    # turn 跨度里出现、catalog 却没有的线程：补最小 busy 条目（宁可误保护）
+    for tid, t_ts in turns.items():
+        if tid in out or (now - t_ts) >= finish_silence_s:
+            continue
+        out[tid] = {
+            "session_id": tid, "title": None, "cwd": None,
+            "source_kind": None, "git_branch": None,
+            "busy": True, "silence_s": round(now - t_ts, 1),
+            "last_activity": t_ts, "activity_source": "runtime_turn",
+            "finish_reason": None,
             "runtime_age_s": round(rt_age, 1) if rt_age is not None else None,
             "src": "sqlite",
         }

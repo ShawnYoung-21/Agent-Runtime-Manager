@@ -114,7 +114,8 @@ def diagnose() -> list[dict]:
     """网络分层诊断（合盖报告/排障用，非 2s 热路径）。
 
     阶梯：默认网关(ICMP, 仅供参考——ICMP 可能被防火墙拦) →
-    DNS 解析 → 公网 TCP。区分"网关断/DNS 坏/公网断"三种故障层。
+    DNS 解析 → 公网 TCP。目标国内优先多候选，防单一境外目标间歇
+    超时造成误报（1.1.1.1/chatgpt.com 在国内均不可靠，2026-09-29）。
     """
     out: list[dict] = []
     gw = default_gateway()
@@ -133,15 +134,24 @@ def diagnose() -> list[dict]:
                               f" ({round((time.monotonic()-started)*1000)}ms)"})
     else:
         out.append({"check": "网关连通(参考)", "ok": None, "detail": "未找到默认网关"})
-    # DNS：能解析说明本机解析器到递归 DNS 的链路活着
-    try:
-        socket.getaddrinfo("chatgpt.com", 443, type=socket.SOCK_STREAM)
-        out.append({"check": "DNS 解析", "ok": True, "detail": "chatgpt.com 解析成功"})
-    except OSError as exc:
-        out.append({"check": "DNS 解析", "ok": False,
-                    "detail": f"解析失败: {exc.__class__.__name__}"})
-    # 公网 TCP：最终判定层
-    pub = probe("1.1.1.1", 443, 0.5)
-    out.append({"check": "公网 TCP", "ok": pub["ok"],
-                "detail": f"1.1.1.1:443 {pub['reason']}"})
+    # DNS：任一候选能解析即视为解析器链路健康（chatgpt.com 国内可能被污染，
+    # baidu 作国内基准——两者都失败才算 DNS 层故障）
+    dns_ok = False
+    dns_fail = []
+    for host in ("www.baidu.com", "chatgpt.com"):
+        try:
+            socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+            dns_ok = True
+        except OSError as exc:
+            dns_fail.append(f"{host}:{exc.__class__.__name__}")
+    out.append({"check": "DNS 解析", "ok": dns_ok,
+                "detail": "解析成功" if dns_ok else f"全部失败 {', '.join(dns_fail)}"})
+    # 公网 TCP：任一候选通即视为可用（多候选防境外目标间歇超时）
+    pub_hits = []
+    for host, port in (("www.baidu.com", 443), ("1.1.1.1", 443)):
+        pub = probe(host, port, 0.6)
+        if pub["ok"]:
+            pub_hits.append(f"{host}:{port} {pub['latency_ms']}ms")
+    out.append({"check": "公网 TCP", "ok": bool(pub_hits),
+                "detail": "、".join(pub_hits) if pub_hits else "全部候选不可达"})
     return out

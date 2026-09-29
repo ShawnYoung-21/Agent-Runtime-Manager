@@ -107,6 +107,7 @@ class TestCodexBusy:
 
         self._reset(tr)
         monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "read_runtime_turn_activity", lambda *a, **k: {})
         monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {})
         monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [])
         monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [{
@@ -125,6 +126,7 @@ class TestCodexBusy:
 
         self._reset(tr)
         monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "read_runtime_turn_activity", lambda *a, **k: {})
         monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [])
         monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {
             "done": {"state": "finished", "reason": "completed", "sequence": 9},
@@ -147,6 +149,7 @@ class TestCodexBusy:
 
         self._reset(tr)
         monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "read_runtime_turn_activity", lambda *a, **k: {})
         monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {})
         monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [{
             "thread_id": "run", "title": "长任务", "cwd": None,
@@ -164,10 +167,52 @@ class TestCodexBusy:
         assert row["silence_s"] <= 90
         assert row["finish_reason"] is None
 
+    def test_runtime_turn_overrides_terminal_and_stale_catalog(self, monkeypatch):
+        """第三路证据：logs_2 turn 跨度活跃时，终态/判闲一律让位（终态后
+        新回合、catalog 心跳失灵都以实时跨度为准——宁误保护）。"""
+        import time
+        import arm.sensors.codex_transcript as tr
+
+        self._reset(tr)
+        now = time.time()
+        monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [])
+        monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {
+            "t1": {"state": "finished", "reason": "completed", "sequence": 9},
+        })
+        monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [{
+            "thread_id": "t1", "title": "旧终态任务", "cwd": None,
+            "source_kind": "vscode", "git_branch": None,
+            "source_updated_at": now - 700,
+        }])
+        monkeypatch.setattr(tr, "read_runtime_turn_activity",
+                            lambda *a, **k: {"t1": now - 5})
+        row = tr.busy_codex_sessions()[0]
+        assert row["busy"] is True
+        assert row["activity_source"] == "runtime_turn"
+        assert row["finish_reason"] is None
+
+    def test_turn_only_unknown_thread_gets_busy_entry(self, monkeypatch):
+        """turn 跨度里出现、catalog 未收录的线程：补最小 busy 条目（宁误保护）。"""
+        import time
+        import arm.sensors.codex_transcript as tr
+
+        self._reset(tr)
+        now = time.time()
+        monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [])
+        monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {})
+        monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [])
+        monkeypatch.setattr(tr, "read_runtime_turn_activity",
+                            lambda *a, **k: {"ghost": now - 3})
+        busy = [x for x in tr.busy_codex_sessions() if x["busy"]]
+        assert len(busy) == 1
+        assert busy[0]["session_id"] == "ghost"
+        assert busy[0]["activity_source"] == "runtime_turn"
+
 
 class TestCodexRobustness:
     """传感器自身健壮性（2026-09-29 审计：单进程双线程并发 + 头部竞态）。"""
-
     def test_concurrent_catalog_reads(self, tmp_path, monkeypatch):
         """引擎线程 + UI 线程同时调用：临时文件必须线程级隔离，互不踩踏。"""
         import sqlite3 as sq
