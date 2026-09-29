@@ -135,7 +135,7 @@
 - **新能力**：①Codex 会话级忙闲判定（timeline 终态优先，修复"任务结束仍显示在线"）；②网络分层诊断（网关/DNS/公网 TCP）+ UI 顶栏网络告警；③合盖测试报告新增 SleepStudy HTML 证据与三层网络证据；④ChatGPT.exe/codex app-server 常驻不再作为任务兜底。
 - **为什么**：旧版把全局 WAL 活动误归因给最新会话导致保护不释放、活动显示错误；且合盖断网无可观测证据。实测（用电池+保护中+合盖）确认掉网后，再执行第 11 项实验。
 - **还原**：git 分支 `claude/quirky-moore-4de65d`（commits f1237a5..ad9b8f4），需要时可从 main 重新安装旧版。
-- **执行记录**：⬜ 待执行
+- **执行记录**：✅ 已执行（2026-09-29：无残留进程 → `uv tool install --force .` → `schtasks /Run ARM-App` 成功；心跳 1s 内恢复，引擎进入 PROTECTING 保护当前活跃会话）
 
 ---
 
