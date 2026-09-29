@@ -16,3 +16,6 @@ dist/
 # arm 运行数据（本地）
 .arm/
 .claude/settings.local.json
+
+# 宣传片等本地产出物
+output/
