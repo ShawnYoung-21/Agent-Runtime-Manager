@@ -90,6 +90,11 @@ app 硬死 = 引擎同死，进程内互护（_app_watchdog/_ensure_daemon）全
     禁止再用“最新目录项”方式归因给某个会话；任务忙闲必须用会话级 timeline/rollout 或自身静默。
 11. 合盖后出现 `Reconnecting... waiting for network` 属于 Codex 自身网络/连接链路状态。ARM 可检测并提示，
     但不能替应用重建远端连接；网络 down 时不会撤销真实任务保护。
+12. **AX211 电池省电模式是合盖断网的首要嫌疑（2026-09-29 调研定级）**：本机实测
+    无线适配器省电模式 AC=最高性能(0)、DC=中等省电(2)——合盖+电池正是 DC 路径。
+    Intel 官方说明"允许计算机关闭此设备"复选框**不**控制 Wi-Fi 正常省电（社区偏方无效），
+    真正的单变量实验是 DC 改最高性能（GUID 19cbb8fa…/12bbebe6…，改动须先登记台账）。
+    详见 `docs/ARM_Modern_Standby_Research_Q1-Q4_Report.md`（已核验 GUID）与 Codex issue #45099。
 
 ## 六、ARM-Watchdog 注册（管理员 PowerShell，一次性）
 
