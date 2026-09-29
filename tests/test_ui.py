@@ -46,6 +46,7 @@ class TestUIApi:
         s = _get(base + "/api/state")
         assert {"now", "protection", "power", "standby", "agents", "events"} <= set(s)
         assert s["protection"]["state"] == "DISARMED"
+        assert {"status", "up", "reason"} <= set(s["network"])
 
     def test_protect_release_flow(self, server):
         # 注：本机若真有 Claude Code 进程在跑，进程兜底会让 protect 直接进 PROTECTING；
@@ -92,6 +93,15 @@ class TestLidReport:
         fake_data = tmp_path / "armdata"
         fake_data.mkdir()
         monkeypatch.setattr(pmod, "data_dir", lambda: fake_data)
+        # 隔离：网络诊断与 SleepStudy 不在单测里跑真实探测/powercfg
+        import arm.sensors.network as net
+
+        monkeypatch.setattr(net, "diagnose", lambda: [
+            {"check": "DNS 解析", "ok": True, "detail": "mock"},
+            {"check": "公网 TCP", "ok": True, "detail": "mock"},
+        ])
+        monkeypatch.setattr(srv, "_sleepstudy_evidence",
+                            lambda: {"check": "SleepStudy", "ok": True, "detail": "mock"})
         # 记录基线
         assert _post(base + "/api/lid-baseline")["ok"] is True
         assert (fake_data / "lid_test_baseline.txt").exists()
@@ -101,6 +111,7 @@ class TestLidReport:
         assert rep["verdict"] in ("pass", "fail")
         checks = {e["check"] for e in rep["evidence"]}
         assert "daemon 心跳" in checks and "合盖后 hook 事件" in checks
+        assert "DNS 解析" in checks and "公网 TCP" in checks and "SleepStudy" in checks
 
 
 class TestTokenAuth:

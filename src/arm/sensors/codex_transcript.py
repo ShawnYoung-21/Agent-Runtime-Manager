@@ -32,6 +32,7 @@ from typing import Optional
 _meta_cache: dict[str, dict] = {}
 _tail_cache: dict[str, tuple[float, list]] = {}
 _catalog_cache: dict[tuple, list] = {}
+_timeline_cache: dict[tuple, dict[str, dict]] = {}
 _result_cache: dict = {"key": None, "at": 0.0, "data": []}
 
 
@@ -270,11 +271,90 @@ def read_sqlite_catalog() -> list[dict]:
                 pass
 
 
+def read_sqlite_timeline() -> dict[str, dict]:
+    """读取 Codex thread_timeline_ledger 的最新会话级状态。
+
+    这是只读旁路：复制 db 与 WAL 后查询，避免占用 Codex 的写连接。返回值按
+    thread_id 聚合为 ``{"state": ..., "ts": ..., "reason": ...}``；旧版数据库、
+    WAL 不完整或单条 JSON 损坏时安全降级为空，不把全局 app-server 活动归因给会话。
+    """
+    import shutil
+    import sqlite3
+    import tempfile
+
+    src = sessions_root().parent / "sqlite" / "codex-dev.db"
+    if not src.exists():
+        return {}
+    try:
+        key = (src.stat().st_mtime,
+               src.with_name(src.name + "-wal").stat().st_mtime)
+    except OSError:
+        return {}
+    cached = _timeline_cache.get(key)
+    if cached is not None:
+        return cached
+
+    tmp = Path(tempfile.gettempdir()) / f"arm_codex_timeline_{os.getpid()}.db"
+    try:
+        shutil.copy2(src, tmp)
+        for ext in ("-wal", "-shm"):
+            try:
+                shutil.copy2(src.with_name(src.name + ext), Path(str(tmp) + ext))
+            except OSError:
+                pass
+        conn = sqlite3.connect(str(tmp))
+        rows = conn.execute(
+            "SELECT thread_id, sequence, payload_json FROM thread_timeline_ledger"
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return {}
+    finally:
+        for ext in ("", "-wal", "-shm"):
+            try:
+                Path(str(tmp) + ext).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    out: dict[str, dict] = {}
+    for thread_id, sequence, raw in rows:
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        sid = thread_id
+        session_sid = payload.get("sessionId")
+        if not sid and not session_sid:
+            continue
+        typ = payload.get("type")
+        status = payload.get("status")
+        state = None
+        reason = None
+        if typ == "session-started":
+            state, reason = "running", "session-started"
+        elif typ == "voice-work-claimed":
+            state, reason = "running", "claimed"
+        elif typ == "session-ended":
+            state, reason = "finished", payload.get("outcome") or "session-ended"
+        elif typ == "voice-work-terminal" and status in ("completed", "interrupted"):
+            state, reason = "finished", status
+        if state is None:
+            continue
+        old = out.get(sid)
+        if old is None or sequence >= old["sequence"]:
+            item = {"state": state, "sequence": sequence, "reason": reason}
+            out[sid] = item
+            if session_sid:
+                out[session_sid] = item
+    if len(_timeline_cache) > 8:
+        _timeline_cache.pop(next(iter(_timeline_cache)))
+    _timeline_cache[key] = out
+    return out
 def busy_codex_sessions(finish_silence_s: float = 90.0,
                         max_age_s: float = 7 * 86400.0) -> list[dict]:
     """所有近期 Codex 会话（双源合并，busy 在前）。供引擎/UI。
 
-    源 A（sqlite catalog）：运行时 WAL 活跃且为最近目录项 → BUSY
+    源 A（sqlite catalog/timeline）：终态优先；进行中事件须同时满足会话自身静默阈值
     源 B（rollout jsonl）：静默阈值（冷文件按 mtime 直接短路，不读尾）
     结果 2.5s TTL 缓存：引擎与 UI 的双调用共享一次真实扫描。
     调用方契约：只读返回的 dict（勿原地修改，缓存共享）。
@@ -288,25 +368,27 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
     out: dict[str, dict] = {}
 
     # 源 A：sqlite 目录（新版桌面/VSCode）
-    # 忙闲三信号：
-    #   a. catalog.source_updated_at（低频心跳，分钟级）< 180s
-    #   b. WAL mtime（实时写入，任务跑时秒级刷新）< 90s → 有 Codex 任务在写库
-    #   b 为真时，把"最近更新的会话"视为 BUSY（WAL 不区分是哪个会话写的，
-    #   但最近更新的目录项几乎必然就是活跃会话——保守多亮灯）
+    # 仅使用会话自身 source_updated_at 与 timeline 终态。运行时 WAL 是全局
+    # app-server 心跳，不能再用 idx==0 把它归因给最新会话。
+    timeline = read_sqlite_timeline()
     rt_age = runtime_activity_age()
-    rt_live = rt_age is not None and rt_age < finish_silence_s
-
-    # catalog 只作会话归属（分钟级心跳不足以判忙闲）
     cat_rows = read_sqlite_catalog()
-    for idx, r in enumerate(cat_rows):
+    for r in cat_rows:
         ts = r.get("source_updated_at") or 0
         silence = max(0.0, now - ts)
-        # 显示用"最后活动"：catalog 心跳是分钟级滞后，运行时 WAL 才是秒级实时——
-        # 忙碌归因本就依赖 WAL，显示口径与归因保持一致（取两者较新的活动），
-        # 否则任务跑着 UI 却显示"20 分钟前活动"（2026-09-28 用户实测反馈）
-        display_silence = min(silence, rt_age) if rt_age is not None else silence
-        # 忙 = 运行时 WAL 活跃 且 该会话是最近目录项（WAL 不区分会话，最近项即活跃项）
-        busy = rt_live and idx == 0
+        terminal = timeline.get(r["thread_id"])
+        if terminal is not None and terminal.get("state") == "finished":
+            busy = False
+            activity_source = "timeline"
+            finish_reason = terminal.get("reason")
+        elif terminal is not None and terminal.get("state") == "running":
+            busy = silence < finish_silence_s
+            activity_source = "timeline+catalog"
+            finish_reason = None if busy else "timeline 活跃但自身静默超时"
+        else:
+            busy = silence < finish_silence_s
+            activity_source = "catalog"
+            finish_reason = None if busy else "source_updated_at 静默超时"
         out[r["thread_id"]] = {
             "session_id": r["thread_id"],
             "title": r.get("title"),
@@ -314,9 +396,11 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
             "source_kind": r.get("source_kind"),
             "git_branch": r.get("git_branch"),
             "busy": busy,
-            "silence_s": round(display_silence, 1),
-            "runtime_age_s": round(rt_age, 1) if rt_age is not None else None,
+            "silence_s": round(silence, 1),
             "last_activity": ts,
+            "activity_source": activity_source,
+            "finish_reason": finish_reason,
+            "runtime_age_s": round(rt_age, 1) if rt_age is not None else None,
             "src": "sqlite",
         }
 

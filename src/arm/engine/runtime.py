@@ -47,9 +47,9 @@ def _codex_active() -> bool:
     except Exception:
         pass
     try:
-        from arm.adapters.codex import codex_running
+        from arm.adapters.codex import codex_task_process_running
 
-        return codex_running()
+        return codex_task_process_running()
     except Exception:
         return False
 
@@ -78,6 +78,7 @@ class RuntimeEngine:
         self._last_hooks_check: float = 0.0
         self._hooks_seen_ok: bool = False
         self._last_prune: float = 0.0
+        self._last_network_warning: float = 0.0
 
     # ---- 历史数据清理 ----
     def _maybe_prune(self) -> None:
@@ -299,6 +300,15 @@ class RuntimeEngine:
     def tick(self) -> dict:
         """执行一次 感知→决策→控制。返回决策快照（供 status/日志/测试）。"""
         p = power_sensor.snapshot()
+        try:
+            from arm.sensors import network as network_sensor
+
+            network = network_sensor.snapshot()
+        except Exception:
+            network = {"status": "unknown", "up": None, "reason": "网络传感器不可用"}
+        if network.get("up") is False and time.time() - self._last_network_warning >= 60.0:
+            get_logger().warning("network unavailable: %s", network.get("reason"))
+            self._last_network_warning = time.time()
         self._maybe_prune()                  # 历史数据低频清理
         self._hooks_sentinel()               # hooks 哨兵：被第三方工具冲掉自动重注入
         self._reconcile_with_transcripts()   # transcript 旁路对账：先救活/判定
@@ -306,7 +316,7 @@ class RuntimeEngine:
         self._sync_with_store()              # 采纳其它进程的 arm/release（跨进程一致）
         any_active = self._any_agent_active()
         prot = self.machine.update(any_active)
-        d = decide(prot, any_active, power=p, network_up=None)
+        d = decide(prot, any_active, power=p, network_up=network.get("up"))
 
         self._apply(d.should_protect, d.reason)
         prev_prot = self.store.get_protection()
@@ -331,6 +341,7 @@ class RuntimeEngine:
             "guard_active": self.guard.active,
             "any_agent_active": any_active,
             "reason": d.reason,
+            "network": network,
             "warnings": list(d.warnings),
         }
 

@@ -94,3 +94,93 @@ class TestTranscriptBusy:
         assert res["hot"]["silence_s"] < 90
         assert res["cold"]["busy"] is False
         assert res["cold"]["silence_s"] >= 3600
+
+
+class TestCodexBusy:
+    def _reset(self, tr):
+        tr._result_cache.update(key=None, at=0.0, data=[])
+
+    def test_global_wal_does_not_mark_latest_catalog_busy(self, monkeypatch):
+        """全局 app-server WAL 常热，不得再把最新目录项误判为任务活跃。"""
+        import time
+        import arm.sensors.codex_transcript as tr
+
+        self._reset(tr)
+        monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {})
+        monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [])
+        monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [{
+            "thread_id": "done", "title": "结束任务", "cwd": None,
+            "source_kind": "chatgpt", "git_branch": None,
+            "source_updated_at": time.time() - 300,
+        }])
+        row = tr.busy_codex_sessions()[0]
+        assert row["busy"] is False
+        assert row["activity_source"] == "catalog"
+
+    def test_timeline_terminal_overrides_recent_catalog(self, monkeypatch):
+        """明确终态应立即熄灯，不必等待 90 秒。"""
+        import time
+        import arm.sensors.codex_transcript as tr
+
+        self._reset(tr)
+        monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [])
+        monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {
+            "done": {"state": "finished", "reason": "completed", "sequence": 9},
+        })
+        monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [{
+            "thread_id": "done", "title": "结束任务", "cwd": None,
+            "source_kind": "chatgpt", "git_branch": None,
+            "source_updated_at": time.time() - 2,
+        }])
+        row = tr.busy_codex_sessions()[0]
+        assert row["busy"] is False
+        assert row["activity_source"] == "timeline"
+        assert row["finish_reason"] == "completed"
+
+
+class TestNetworkSensor:
+    def test_up_and_cache(self, monkeypatch):
+        import arm.sensors.network as net
+
+        calls = []
+
+        class Conn:
+            def __enter__(self): return self
+            def __exit__(self, *_a): return None
+
+        monkeypatch.setattr(net.socket, "create_connection",
+                            lambda *a, **k: calls.append((a, k)) or Conn())
+        net._cache.update(at=0.0, data=None)
+        first = net.snapshot(cache_s=60)
+        second = net.snapshot(cache_s=60)
+        assert first["status"] == "up" and second["up"] is True
+        assert len(calls) == 1
+
+    def test_timeout_is_down(self, monkeypatch):
+        import arm.sensors.network as net
+
+        def fail(*_a, **_k):
+            raise net.socket.timeout()
+
+        monkeypatch.setattr(net.socket, "create_connection", fail)
+        net._cache.update(at=0.0, data=None)
+        result = net.snapshot(cache_s=0)
+        assert result["status"] == "down"
+        assert "超时" in result["reason"]
+
+    def test_diagnose_ladder(self, monkeypatch):
+        """分层诊断：网关信息条不判定、DNS/公网 TCP 为硬判据。"""
+        import arm.sensors.network as net
+
+        monkeypatch.setattr(net, "default_gateway", lambda: None)
+        monkeypatch.setattr(net.socket, "getaddrinfo",
+                            lambda *a, **k: [("2.0.0.0", 0)])
+        monkeypatch.setattr(net, "probe",
+                            lambda *_a, **_k: {"ok": False, "latency_ms": None, "reason": "TCP 超时"})
+        rows = net.diagnose()
+        by = {r["check"]: r for r in rows}
+        assert by["网关连通(参考)"]["ok"] is None
+        assert by["DNS 解析"]["ok"] is True
+        assert by["公网 TCP"]["ok"] is False

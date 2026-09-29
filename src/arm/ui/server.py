@@ -20,6 +20,7 @@ from typing import Optional
 from arm.core.store import Store
 from arm.sensors import power as power_sensor
 from arm.sensors import standby as standby_sensor
+from arm.sensors import network as network_sensor
 
 _HTML = r"""<!doctype html>
 <html lang="zh-CN">
@@ -371,7 +372,9 @@ function renderHealth(s) {
   if (s.hooks && s.hooks.installed === false) problems.push('hooks 缺失（自动修复中）');
   const daemonDead = !(s.daemon && s.daemon.alive);
   const hasBusy = (s.live_sessions || []).length > 0;
+  const net = s.network || {};
   if (daemonDead) problems.push('daemon 未运行');
+  if (net.status === 'down') problems.push('网络不可用 · ' + (net.reason || '等待恢复'));
   const hb = $('hbadge');
   if (problems.length) {
     hb.className = 'hbadge ' + (hasBusy && daemonDead ? 'hb-bad' : 'hb-warn');
@@ -398,6 +401,10 @@ function renderHero(s) {
     const tagTxt = (isCodex ? 'Codex' : 'Claude') + (origin === 'desktop' ? ' 桌面端' : ' CLI');
     const act_sil = x.silence_s < 60 ? '刚刚活动' :
       (x.silence_s < 3600 ? Math.floor(x.silence_s/60) + ' 分钟前活动' : Math.floor(x.silence_s/3600) + ' 小时前活动');
+    const activityNote = x.finish_reason ? ' · ' + x.finish_reason : '';
+    const reconnecting = x.busy && s.network && s.network.status === 'down';
+    const stateLabel = x.finish_reason ? '任务已结束 · 应用仍打开' :
+      (reconnecting ? '应用正在等待网络' : act_sil);
     const sid = x.session_id || '';
     const resumeBtn = origin === 'desktop' ? '' :
       '<button class="small accent" data-act="resume" data-sid="' + esc(sid) + '" data-agent="' + x.agent + '">继续会话</button>';
@@ -405,7 +412,7 @@ function renderHero(s) {
       '<div class="band"></div>' +
       '<div class="inner">' +
       '<div class="nm">' + esc(nm) + '</div>' +
-      '<div class="tagline"><span class="atag ' + tagCls + '">' + tagTxt + '</span><span>' + act_sil + '</span></div>' +
+      '<div class="tagline"><span class="atag ' + tagCls + '">' + tagTxt + '</span><span>' + stateLabel + activityNote + '</span></div>' +
       '<div class="meta-row">' + resumeBtn +
         '<button class="small ghost" data-act="copycmd" data-sid="' + esc(sid) + '" data-agent="' + (x.agent||'claude') +
         '" title="复制恢复命令——粘贴到任意终端即可进入该会话">⧉ 复制命令</button></div>' +
@@ -902,6 +909,18 @@ def _lid_test_report(store: Store) -> dict:
             })
         except Exception as exc:
             now_evidence.append({"check": "transcript 旁路", "ok": None, "detail": f"不可用: {exc}"})
+        # 证据4：网络分层（调研 v3.0 P0：区分网关/DNS/公网哪一层断）
+        try:
+            from arm.sensors.network import diagnose
+            now_evidence.extend(diagnose())
+        except Exception as exc:
+            now_evidence.append({"check": "网络分层", "ok": None, "detail": f"不可用: {exc}"})
+        # 证据5：SleepStudy（调研 v3.0 P0：合盖期间 Modern Standby 会话权威证据——
+        # 回答"系统到底睡没睡、谁阻塞/放行了保活"。生成失败（需管理员）不影响判定）
+        try:
+            now_evidence.append(_sleepstudy_evidence())
+        except Exception as exc:
+            now_evidence.append({"check": "SleepStudy", "ok": None, "detail": f"不可用: {exc}"})
 
     verdict = None
     if baseline_ts is None:
@@ -914,6 +933,27 @@ def _lid_test_report(store: Store) -> dict:
         "verdict": verdict,
         "evidence": now_evidence,
     }
+
+
+def _sleepstudy_evidence() -> dict:
+    """生成 SleepStudy HTML 报告到 data_dir，返回证据条目（ok=None 不影响判定）。
+
+    powercfg /sleepstudy 需要 Modern Standby 机器；非管理员可能失败——
+    失败只记原因，不作为 pass/fail 判据。
+    """
+    import subprocess
+
+    from arm.core import paths
+
+    out = paths.data_dir() / "sleepstudy.html"
+    r = subprocess.run(["powercfg", "/sleepstudy", "/output", str(out)],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode == 0 and out.exists():
+        return {"check": "SleepStudy", "ok": True,
+                "detail": f"已生成 {out}"}
+    return {"check": "SleepStudy", "ok": None,
+            "detail": f"生成失败 rc={r.returncode}（可能需要管理员权限，可手动以管理员运行 "
+                      f"powercfg /sleepstudy）"}
 
 
 def datetime_fmt(ts: float) -> str:
@@ -974,6 +1014,8 @@ def _collect_state(store: Store) -> dict:
                 "last_activity": x.get("last_activity"),
                 "codex_title": x.get("title"),
                 "source_kind": x.get("source_kind"),
+                "activity_source": x.get("activity_source"),
+                "finish_reason": x.get("finish_reason"),
             })
     except Exception:
         pass
@@ -1009,6 +1051,7 @@ def _collect_state(store: Store) -> dict:
             "charging": p.charging,
             "low_battery": p.low_battery,
         },
+        "network": network_sensor.snapshot(),
         "standby": "S0 Modern Standby" if sb else ("S3" if s3 else "未知"),
         "agents": agents,
         "claude_procs": len(claude_procs),

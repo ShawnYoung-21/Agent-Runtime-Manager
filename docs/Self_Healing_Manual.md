@@ -23,6 +23,8 @@
 | 保护状态卡死（硬杀后假 PROTECTING） | 读取侧 | 心跳过期自动判 DISARMED（stale 显示） | 30s 无心跳 | store.py `get_effective_protection` |
 | 跨进程状态分叉（UI/CLI vs 引擎） | 引擎 `_sync_with_store` | 库是唯一事实源，采纳外部 arm/release | 每拍 | runtime.py |
 | **多引擎双持锁**（2026-09-28 事故根因） | 单实例锁 `use_last_error=True` | windll 直调 GetLastError 会被 ctypes 冲掉错误码→双引擎互搏→电源快照被"钉到一半"的值覆盖。已根治，勿改回 | 每次加锁 | core/single_instance.py |
+| **Codex 应用在线但任务已结束** | `busy_codex_sessions` 会话级证据 | 优先读 `thread_timeline_ledger` 终态；否则只看该 thread 自身 `source_updated_at` 静默，不再把全局 WAL/常驻 app-server 归因给最新会话 | 90s 静默 | sensors/codex_transcript.py |
+| **合盖后 Codex 显示等待网络** | network sensor | UI/日志提示网络不可用；真实 busy 任务继续保护，网络抖动不触发释放 | 5s 缓存 / 60s 日志节流 | sensors/network.py + runtime.py |
 
 ## 二、进程模型（单进程 + OS 级看门狗）
 
@@ -83,6 +85,11 @@ app 硬死 = 引擎同死，进程内互护（_app_watchdog/_ensure_daemon）全
 8. 启动布防尊重用户：上次是 "user release" → 本次启动保持未布防，手动开启即可
 9. 测试纪律：引擎测试必须 mock 电源策略与 transcript 扫描
    （否则 pytest 会真钉真机电源、真拉起 app——2026-09-28 基线跑分实测发生过）
+10. **Codex/ChatGPT 桌面应用常驻不等于任务活跃**：`ChatGPT.exe`、`codex.exe app-server` 与
+    `logs_2.sqlite-wal` 会在任务结束、后台重连或其它连接存在时继续运行/刷新。全局 WAL 只能作诊断，
+    禁止再用“最新目录项”方式归因给某个会话；任务忙闲必须用会话级 timeline/rollout 或自身静默。
+11. 合盖后出现 `Reconnecting... waiting for network` 属于 Codex 自身网络/连接链路状态。ARM 可检测并提示，
+    但不能替应用重建远端连接；网络 down 时不会撤销真实任务保护。
 
 ## 六、ARM-Watchdog 注册（管理员 PowerShell，一次性）
 
