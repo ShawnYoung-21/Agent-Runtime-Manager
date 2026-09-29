@@ -13,6 +13,60 @@ from typing import Optional
 _cache: dict[str, object] = {"at": 0.0, "data": None}
 _gateway_cache: dict[str, object] = {"at": 0.0, "data": None}
 
+# 默认探测目标（2026-09-29 修正）：单靠 1.1.1.1 在国内网络会间歇超时
+# （实测延迟 234ms，0.25s 超时贴线误报"网络不可用"）。改为多目标、国内优先，
+# 任一成功即 up；ARM_NETWORK_PROBE_HOST 环境变量可整体覆盖。
+_DEFAULT_TARGETS: list[tuple[str, int]] = [
+    ("www.baidu.com", 443),  # DNS 解析 + TCP（国内，含 DNS 层健康）
+    ("223.5.5.5", 53),       # AliDNS over TCP（国内，绕开 DNS 只测路由）
+    ("1.1.1.1", 443),        # 国外兜底（Cloudflare）
+]
+
+
+def snapshot(cache_s: float = 5.0, timeout_s: float = 0.8) -> dict:
+    """返回 ``status`` (up/down/unknown)、原因与探测耗时。
+
+    多目标 TCP 探测，任一成功即视为网络可用；全部失败才判 down。结果短缓存，
+    保证引擎 2 秒节拍不会被网络调用拖住。
+    """
+    now = time.monotonic()
+    cached = _cache.get("data")
+    if cached is not None and now - float(_cache.get("at", 0.0)) < cache_s:
+        return dict(cached)  # type: ignore[arg-type]
+    override = os.environ.get("ARM_NETWORK_PROBE_HOST")
+    if override:
+        try:
+            port = int(os.environ.get("ARM_NETWORK_PROBE_PORT", "443"))
+        except ValueError:
+            port = 443
+        targets = [(override, port)]
+    else:
+        targets = _DEFAULT_TARGETS
+
+    started = time.monotonic()
+    result = {"status": "unknown", "up": None, "host": None, "port": None,
+              "latency_ms": None, "reason": "未探测"}
+    failures: list[str] = []
+    for host, port in targets:
+        try:
+            with socket.create_connection((host, port), timeout=timeout_s):
+                result.update(status="up", up=True, host=host, port=port,
+                              reason=f"{host}:{port} TCP 可达",
+                              latency_ms=round((time.monotonic() - started) * 1000, 1))
+                break
+        except (TimeoutError, socket.timeout):
+            failures.append(f"{host}:{port} 超时")
+        except OSError as exc:
+            failures.append(f"{host}:{port} {exc.__class__.__name__}")
+        except Exception as exc:
+            failures.append(f"{host}:{port} 异常 {exc.__class__.__name__}")
+    else:
+        result.update(status="down", up=False, host=targets[0][0],
+                      port=targets[0][1],
+                      reason="全部探测失败: " + "; ".join(failures))
+    _cache.update(at=now, data=result)
+    return dict(result)
+
 
 def default_gateway(cache_s: float = 60.0) -> Optional[str]:
     """读 IPv4 默认网关（route print 解析，结果短缓存）。
@@ -91,35 +145,3 @@ def diagnose() -> list[dict]:
     out.append({"check": "公网 TCP", "ok": pub["ok"],
                 "detail": f"1.1.1.1:443 {pub['reason']}"})
     return out
-
-
-def snapshot(cache_s: float = 5.0, timeout_s: float = 0.25) -> dict:
-    """返回 ``status`` (up/down/unknown)、原因与探测耗时。
-
-    使用 TCP 探测而不是 ping，避免管理员权限和 ICMP 被禁造成假阴性；探测结果短缓存，
-    保证引擎 2 秒节拍不会被网络调用拖住。
-    """
-    now = time.monotonic()
-    cached = _cache.get("data")
-    if cached is not None and now - float(_cache.get("at", 0.0)) < cache_s:
-        return dict(cached)  # type: ignore[arg-type]
-    host = os.environ.get("ARM_NETWORK_PROBE_HOST", "1.1.1.1")
-    try:
-        port = int(os.environ.get("ARM_NETWORK_PROBE_PORT", "443"))
-    except ValueError:
-        port = 443
-    started = time.monotonic()
-    result = {"status": "unknown", "up": None, "host": host, "port": port,
-              "latency_ms": None, "reason": "未探测"}
-    try:
-        with socket.create_connection((host, port), timeout=timeout_s):
-            result.update(status="up", up=True, reason="TCP 探测成功")
-    except (TimeoutError, socket.timeout):
-        result.update(status="down", up=False, reason="TCP 探测超时")
-    except OSError as exc:
-        result.update(status="down", up=False, reason=f"TCP 探测失败: {exc.__class__.__name__}")
-    except Exception as exc:
-        result["reason"] = f"探测异常: {exc.__class__.__name__}"
-    result["latency_ms"] = round((time.monotonic() - started) * 1000, 1)
-    _cache.update(at=now, data=result)
-    return dict(result)

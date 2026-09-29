@@ -168,7 +168,24 @@ class TestNetworkSensor:
         net._cache.update(at=0.0, data=None)
         result = net.snapshot(cache_s=0)
         assert result["status"] == "down"
-        assert "超时" in result["reason"]
+        assert "全部探测失败" in result["reason"]
+
+    def test_fallback_to_second_target(self, monkeypatch):
+        """首目标（国内 DNS+TCP）超时应回退到下一目标，任一成功即 up。"""
+        import arm.sensors.network as net
+
+        real = net.socket.create_connection
+
+        def flaky(address, *a, **k):
+            if address[0].startswith("www.baidu.com"):
+                raise net.socket.timeout()
+            return real(address, *a, **k)
+
+        monkeypatch.setattr(net.socket, "create_connection", flaky)
+        net._cache.update(at=0.0, data=None)
+        result = net.snapshot(cache_s=0)
+        assert result["up"] is True
+        assert result["host"] != "www.baidu.com"
 
     def test_diagnose_ladder(self, monkeypatch):
         """分层诊断：网关信息条不判定、DNS/公网 TCP 为硬判据。"""
