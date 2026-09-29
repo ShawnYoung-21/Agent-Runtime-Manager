@@ -167,6 +167,62 @@ class TestCodexBusy:
         assert row["silence_s"] <= 90
         assert row["finish_reason"] is None
 
+    def test_open_turn_parked_for_approval_stays_busy(self, monkeypatch):
+        """等待批准的回合（有 started 无 complete、零写入 5 分钟）必须保持
+        亮灯——用户视角任务没结束；30 分钟窗口兜底防孤儿轮泄漏。"""
+        import time
+        import arm.sensors.codex_transcript as tr
+
+        self._reset(tr)
+        now = time.time()
+        monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "read_runtime_turn_activity", lambda *a, **k: {})
+        monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {})
+        monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [{
+            "thread_id": "t1", "title": "等待批准的任务", "cwd": None,
+            "source_kind": "vscode", "git_branch": None,
+            "source_updated_at": now - 700,
+        }])
+        monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [
+            {"file": "f", "session_id": "t1", "originator": None,
+             "cwd": None, "mtime": now - 300},  # 零写入 5 分钟
+        ])
+        monkeypatch.setattr(tr, "_tail_events", lambda *a, **k: [
+            ("event_msg", "task_started", now - 700),
+            ("event_msg", "item_completed", now - 300),
+        ])  # 回合打开：无 task_complete
+        rows = {x["session_id"]: x for x in tr.busy_codex_sessions()}
+        row = rows["t1"]
+        assert row["busy"] is True
+        assert row["activity_source"] == "turn_open"
+
+    def test_task_complete_releases_immediately(self, monkeypatch):
+        """显式 task_complete 应立即熄灯，不等 90 秒静默（更快释放）。"""
+        import time
+        import arm.sensors.codex_transcript as tr
+
+        self._reset(tr)
+        now = time.time()
+        monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "read_runtime_turn_activity", lambda *a, **k: {})
+        monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {})
+        monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [{
+            "thread_id": "t2", "title": "刚完成任务", "cwd": None,
+            "source_kind": "vscode", "git_branch": None,
+            "source_updated_at": now - 30,
+        }])
+        monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [
+            {"file": "f2", "session_id": "t2", "originator": None,
+             "cwd": None, "mtime": now - 30},
+        ])
+        monkeypatch.setattr(tr, "_tail_events", lambda *a, **k: [
+            ("event_msg", "task_started", now - 600),
+            ("event_msg", "task_complete", now - 30),
+        ])
+        rows = {x["session_id"]: x for x in tr.busy_codex_sessions()}
+        assert rows["t2"]["busy"] is False
+        assert rows["t2"]["finish_reason"] == "task_complete"
+
     def test_runtime_turn_overrides_terminal_and_stale_catalog(self, monkeypatch):
         """第三路证据：logs_2 turn 跨度活跃时，终态/判闲一律让位（终态后
         新回合、catalog 心跳失灵都以实时跨度为准——宁误保护）。"""

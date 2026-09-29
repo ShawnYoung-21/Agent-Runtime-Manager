@@ -178,14 +178,23 @@ def _tail_events(path: Path, mtime: float, tail_bytes: int = 65536) -> list[tupl
     return events
 
 
+OPEN_TURN_CAP_S = 1800.0  # 回合打开（执行中/等待批准）的最长活跃窗口，防孤儿轮泄漏
+
+
 def codex_busy_state(rollout_file: str,
                      finish_silence_s: float = 90.0,
                      now: Optional[float] = None,
-                     mtime: Optional[float] = None) -> Optional[dict]:
-    """判定某 rollout 的忙闲（task_started/task_complete 轮次边界 + 静默阈值）。
+                     mtime: Optional[float] = None,
+                     open_turn_cap_s: float = OPEN_TURN_CAP_S) -> Optional[dict]:
+    """判定某 rollout 的忙闲（turn 边界 + 静默阈值，2026-09-29 升级）。
 
-    统一规则：静默 < finish_silence_s → BUSY（孤儿轮/完成态都靠时间兜底，
-    教训：进程被杀会留下 task_started 无 complete 的孤儿轮，静默 6 天的都有）。
+    实测依据：完成任务末尾有 event_msg/task_complete；执行中/等待批准的
+    回合只有 task_started 无 complete（请求批准期间零写入，纯静默判定会
+    把"等你批"误判成结束）。规则：
+      - 最后边界是 task_complete → 显式完成，立即非 busy（比静默等待更快释放）
+      - 回合打开（started 无 complete）→ busy，窗口 open_turn_cap_s 内有效
+        （等待批准也算任务没完；孤儿轮被窗口兜底，不会永久亮灯）
+      - 无边界标记的旧格式 → 退回纯静默规则
     """
     f = Path(rollout_file)
     now = time.time() if now is None else now
@@ -197,6 +206,20 @@ def codex_busy_state(rollout_file: str,
     if not events:
         return None
     silence = max(0.0, now - mt)
+
+    def _last_boundary(pt: str) -> Optional[float]:
+        ts = None
+        for _t, payload_t, epoch in events:
+            if payload_t == pt and (ts is None or epoch > ts):
+                ts = epoch
+        return ts
+
+    started, complete = _last_boundary("task_started"), _last_boundary("task_complete")
+    if complete is not None and (started is None or complete >= started):
+        return {"busy": False, "silence_s": round(silence, 1), "turn": "complete"}
+    if started is not None:
+        return {"busy": silence < open_turn_cap_s, "silence_s": round(silence, 1),
+                "turn": "open"}
     return {"busy": silence < finish_silence_s, "silence_s": round(silence, 1)}
 
 
@@ -418,7 +441,8 @@ def read_sqlite_timeline() -> dict[str, dict]:
     _timeline_cache[key] = out
     return out
 def busy_codex_sessions(finish_silence_s: float = 90.0,
-                        max_age_s: float = 7 * 86400.0) -> list[dict]:
+                        max_age_s: float = 7 * 86400.0,
+                        open_turn_cap_s: float = OPEN_TURN_CAP_S) -> list[dict]:
     """所有近期 Codex 会话（双源合并，busy 在前）。供引擎/UI。
 
     源 A（sqlite catalog/timeline）：终态优先；进行中事件须同时满足会话自身静默阈值
@@ -496,31 +520,45 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
     for info in scan_rollouts(max_age_s):
         rollout_by_sid[info["session_id"]] = info
         mtime_age = max(0.0, now - info["mtime"])
+        # 判定：mtime<90 热写即活跃；<30min 交给 turn 边界（等待批准的回合
+        # 零写入也要亮灯）；完成态显式熄灯；更冷直接短路
+        st: Optional[dict]
+        if mtime_age < open_turn_cap_s:
+            st = codex_busy_state(info["file"], finish_silence_s=finish_silence_s,
+                                  now=now, mtime=info["mtime"],
+                                  open_turn_cap_s=open_turn_cap_s)
+        else:
+            st = {"busy": False, "silence_s": round(mtime_age, 1)}
+        if st is None:  # 文件读不到：热写兜底为活跃，冷文件视为结束
+            st = {"busy": mtime_age < finish_silence_s,
+                  "silence_s": round(mtime_age, 1)}
+        turn = st.pop("turn", None)  # 先取键再分支，勿提前 pop（complete 判断要用）
+        if turn == "open":
+            st["activity_source"] = "turn_open"
         existing = out.get(info["session_id"])
         if existing is not None:
-            # 热 rollout 覆盖 catalog 误判（2026-09-29 实测回归：Codex 长任务执行中
-            # catalog.source_updated_at 可十几分钟不刷新，"自身静默<90s"把真任务
-            # 熄灯；rollout 是会话自身的直写日志、mtime 秒级实时——它在写=真在跑。
-            # 宁可误保护：热 rollout 无条件覆盖 busy）
-            if mtime_age < finish_silence_s:
-                existing.update(busy=True, silence_s=round(mtime_age, 1),
-                                last_activity=info["mtime"],
-                                activity_source="rollout", finish_reason=None)
-            continue
-        if mtime_age >= finish_silence_s:
-            # 冷文件短路：末次写入已超静默阈值，末条事件必然更早 → 直接非 busy
-            st = {"busy": False, "silence_s": round(mtime_age, 1)}
-        else:
-            st = codex_busy_state(info["file"], finish_silence_s=finish_silence_s,
-                                  now=now, mtime=info["mtime"])
-            if st is None:
+            # 完成事件是强证据：task_complete 立即熄灯（catalog 恰在完成时
+            # 刷新带来的 90s 假忙让位）；但不得覆盖更新的 runtime_turn 信号
+            if turn == "complete":
+                if existing["busy"] and existing.get("activity_source") != "runtime_turn":
+                    existing.update(busy=False, finish_reason="task_complete")
                 continue
+            # rollout 忙（含等待批准的打开回合）覆盖 catalog 判闲——宁可误保护；
+            # 2026-09-29 实测：长任务 catalog 心跳可十几分钟不刷，等待批准零写入
+            if st["busy"] and not existing["busy"]:
+                existing.update(busy=True, silence_s=st["silence_s"],
+                                last_activity=info["mtime"],
+                                activity_source=st.get("activity_source", "rollout"),
+                                finish_reason=None)
+            elif st["busy"]:
+                existing["silence_s"] = min(existing["silence_s"], st["silence_s"])
+            continue
         out[info["session_id"]] = {
             "session_id": info["session_id"],
             "originator": info["originator"],
             "cwd": info["cwd"],
             "last_activity": info["mtime"],
-            "activity_source": "rollout",
+            "activity_source": st.get("activity_source", "rollout"),
             **st,
             "src": "rollout",
         }
