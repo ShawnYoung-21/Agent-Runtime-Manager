@@ -95,6 +95,10 @@ app 硬死 = 引擎同死，进程内互护（_app_watchdog/_ensure_daemon）全
     Intel 官方说明"允许计算机关闭此设备"复选框**不**控制 Wi-Fi 正常省电（社区偏方无效），
     真正的单变量实验是 DC 改最高性能（GUID 19cbb8fa…/12bbebe6…，改动须先登记台账）。
     详见 `docs/ARM_Modern_Standby_Research_Q1-Q4_Report.md`（已核验 GUID）与 Codex issue #45099。
+13. **本机永不自动入睡（2026-09-29 实测定论）**：原始配置合盖动作=不动作、睡眠超时=永不(AC/DC)、
+    休眠超时=永不——系统自身不会进入 Modern Standby。因此"任务结束释放后系统睡掉导致桌面端
+    重连"的路径在本机**不成立**；合盖掉网（Reconnecting）必发生在系统醒着期间，排查聚焦
+    网卡驱动省电 / 路由器踢空闲客户端 / 本地网络栈，不要往睡眠路径上找。
 
 ## 六、ARM-Watchdog 注册（管理员 PowerShell，一次性）
 
