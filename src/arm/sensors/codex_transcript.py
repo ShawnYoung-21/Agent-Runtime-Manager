@@ -408,9 +408,18 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
     rollout_by_sid = {}
     for info in scan_rollouts(max_age_s):
         rollout_by_sid[info["session_id"]] = info
-        if info["session_id"] in out:
-            continue
         mtime_age = max(0.0, now - info["mtime"])
+        existing = out.get(info["session_id"])
+        if existing is not None:
+            # 热 rollout 覆盖 catalog 误判（2026-09-29 实测回归：Codex 长任务执行中
+            # catalog.source_updated_at 可十几分钟不刷新，"自身静默<90s"把真任务
+            # 熄灯；rollout 是会话自身的直写日志、mtime 秒级实时——它在写=真在跑。
+            # 宁可误保护：热 rollout 无条件覆盖 busy）
+            if mtime_age < finish_silence_s:
+                existing.update(busy=True, silence_s=round(mtime_age, 1),
+                                last_activity=info["mtime"],
+                                activity_source="rollout", finish_reason=None)
+            continue
         if mtime_age >= finish_silence_s:
             # 冷文件短路：末次写入已超静默阈值，末条事件必然更早 → 直接非 busy
             st = {"busy": False, "silence_s": round(mtime_age, 1)}
@@ -424,6 +433,7 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
             "originator": info["originator"],
             "cwd": info["cwd"],
             "last_activity": info["mtime"],
+            "activity_source": "rollout",
             **st,
             "src": "rollout",
         }

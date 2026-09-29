@@ -139,6 +139,31 @@ class TestCodexBusy:
         assert row["activity_source"] == "timeline"
         assert row["finish_reason"] == "completed"
 
+    def test_hot_rollout_overrides_stale_catalog(self, monkeypatch):
+        """长任务执行中 catalog 可十几分钟不刷新：热 rollout（mtime 秒级）
+        必须覆盖 catalog 判闲，否则真任务熄灯（2026-09-29 回归）。"""
+        import time
+        import arm.sensors.codex_transcript as tr
+
+        self._reset(tr)
+        monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {})
+        monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [{
+            "thread_id": "run", "title": "长任务", "cwd": None,
+            "source_kind": "vscode", "git_branch": None,
+            "source_updated_at": time.time() - 700,   # catalog 静默 11 分钟
+        }])
+        monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [
+            {"file": "rollout-x", "session_id": "run", "originator": None,
+             "cwd": None, "mtime": time.time() - 15},  # rollout 15s 前还在写
+        ])
+        rows = {x["session_id"]: x for x in tr.busy_codex_sessions()}
+        row = rows["run"]
+        assert row["busy"] is True
+        assert row["activity_source"] == "rollout"
+        assert row["silence_s"] <= 90
+        assert row["finish_reason"] is None
+
 
 class TestNetworkSensor:
     def test_up_and_cache(self, monkeypatch):
