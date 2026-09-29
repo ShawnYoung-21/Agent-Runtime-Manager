@@ -290,6 +290,21 @@ def read_runtime_turn_activity(max_age_s: float = 180.0) -> dict[str, float]:
     return out
 
 
+def ui_state_activity_age() -> Optional[float]:
+    """~/.codex/.codex-global-state.json 的 mtime 龄期（ChatGPT Work 专属信号）。
+
+    2026-09-29 实测：ChatGPT Work 任务流式执行时该 Electron 状态文件 ~2s 级
+    持续刷新，空闲时静默；而 ChatGPT Work 模式不写 rollout、不产生 turn 跨度、
+    catalog 心跳也不实时——这是它唯一的本地活动痕迹。无法归因到具体会话，
+    作为整机级"桌面端有任务在流式执行"信号使用（见 busy_codex_sessions）。
+    """
+    p = sessions_root().parent / ".codex-global-state.json"
+    try:
+        return max(0.0, time.time() - p.stat().st_mtime)
+    except OSError:
+        return None
+
+
 def read_sqlite_catalog() -> list[dict]:
     """读 ~/.codex/sqlite/codex-dev.db 的 local_thread_catalog（新版桌面/VSCode 会话）。
 
@@ -561,6 +576,22 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
             "activity_source": st.get("activity_source", "rollout"),
             **st,
             "src": "rollout",
+        }
+
+    # 源 C：ChatGPT Work 流式活动（第四路，无法归因到线程 → 整机级合成条目）
+    # 仅在没有任何会话级 busy 时补充，避免与其他证据重复亮灯。
+    ui_age = ui_state_activity_age()
+    if (ui_age is not None and ui_age < finish_silence_s
+            and not any(x["busy"] for x in out.values())):
+        out["ui-chatgpt-work"] = {
+            "session_id": "ui-chatgpt-work",
+            "title": "ChatGPT 桌面端（任务流式进行中）",
+            "cwd": None, "source_kind": None, "git_branch": None,
+            "busy": True, "silence_s": round(ui_age, 1),
+            "last_activity": now - ui_age,
+            "activity_source": "ui_state", "finish_reason": None,
+            "runtime_age_s": round(rt_age, 1) if rt_age is not None else None,
+            "src": "ui",
         }
 
     # origin 判定（四类体系）：desktop / cli

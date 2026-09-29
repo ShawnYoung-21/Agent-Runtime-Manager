@@ -108,6 +108,7 @@ class TestCodexBusy:
         self._reset(tr)
         monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
         monkeypatch.setattr(tr, "read_runtime_turn_activity", lambda *a, **k: {})
+        monkeypatch.setattr(tr, "ui_state_activity_age", lambda: None)
         monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {})
         monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [])
         monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [{
@@ -127,6 +128,7 @@ class TestCodexBusy:
         self._reset(tr)
         monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
         monkeypatch.setattr(tr, "read_runtime_turn_activity", lambda *a, **k: {})
+        monkeypatch.setattr(tr, "ui_state_activity_age", lambda: None)
         monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [])
         monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {
             "done": {"state": "finished", "reason": "completed", "sequence": 9},
@@ -166,6 +168,34 @@ class TestCodexBusy:
         assert row["activity_source"] == "rollout"
         assert row["silence_s"] <= 90
         assert row["finish_reason"] is None
+
+    def test_ui_state_lights_synthetic_entry_only_when_idle(self, monkeypatch):
+        """ChatGPT Work 专属：无任何会话级 busy 且 UI 状态文件热写 → 合成条目
+        亮灯；已有会话 busy 时不重复补充。"""
+        import time
+        import arm.sensors.codex_transcript as tr
+
+        self._reset(tr)
+        monkeypatch.setattr(tr, "runtime_activity_age", lambda: 0.1)
+        monkeypatch.setattr(tr, "read_runtime_turn_activity", lambda *a, **k: {})
+        monkeypatch.setattr(tr, "read_sqlite_timeline", lambda: {})
+        monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [])
+        monkeypatch.setattr(tr, "scan_rollouts", lambda *_a, **_k: [])
+        monkeypatch.setattr(tr, "ui_state_activity_age", lambda: 2.0)
+        busy = [x for x in tr.busy_codex_sessions() if x["busy"]]
+        assert len(busy) == 1
+        assert busy[0]["session_id"] == "ui-chatgpt-work"
+        assert busy[0]["activity_source"] == "ui_state"
+
+        # 已有会话级 busy → 不再补充合成条目（先重置 2.5s 结果缓存）
+        self._reset(tr)
+        monkeypatch.setattr(tr, "read_sqlite_catalog", lambda: [{
+            "thread_id": "t9", "title": "本地任务", "cwd": None,
+            "source_kind": "vscode", "git_branch": None,
+            "source_updated_at": time.time() - 10,
+        }])
+        busy = [x for x in tr.busy_codex_sessions() if x["busy"]]
+        assert [x["session_id"] for x in busy] == ["t9"]
 
     def test_open_turn_parked_for_approval_stays_busy(self, monkeypatch):
         """等待批准的回合（有 started 无 complete、零写入 5 分钟）必须保持
