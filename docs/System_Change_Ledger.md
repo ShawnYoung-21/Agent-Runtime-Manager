@@ -135,7 +135,7 @@
 - **新能力**：①Codex 会话级忙闲判定（timeline 终态优先，修复"任务结束仍显示在线"）；②网络分层诊断（网关/DNS/公网 TCP）+ UI 顶栏网络告警；③合盖测试报告新增 SleepStudy HTML 证据与三层网络证据；④ChatGPT.exe/codex app-server 常驻不再作为任务兜底。
 - **为什么**：旧版把全局 WAL 活动误归因给最新会话导致保护不释放、活动显示错误；且合盖断网无可观测证据。实测（用电池+保护中+合盖）确认掉网后，再执行第 11 项实验。
 - **还原**：git 分支 `claude/quirky-moore-4de65d`（commits f1237a5..ad9b8f4），需要时可从 main 重新安装旧版。
-- **执行记录**：✅ 已执行五次（2026-09-29：首装；二次网络多目标 aadfafe；三次热 rollout 6b02b8a；四次健壮性审计 eb37ac2；五次第三路证据 c4471d7——logs_2 turn 跨度按 thread 归因，判定链定版"热 rollout > catalog 静默 > timeline 终态，turn 全局覆盖"；历史日志验证解析器覆盖 6 个真实线程。均心跳秒级恢复、双线程并发压测无异常）
+- **执行记录**：✅ 已执行六次（2026-09-29：一装；二装网络多目标 aadfafe；三装热 rollout 6b02b8a；四装健壮性审计 eb37ac2；五装 turn 跨度第三路证据 c4471d7；六装回合边界四态判定 201a144——"请求批准"状态实测保持亮灯、task_complete 实测立即熄灯。判定链终版：热写/打开回合 > catalog 静默 > timeline 终态 > 完成事件强制熄灯，runtime turn 全局覆盖。证据全本地，不涉远端）
 
 ---
 
