@@ -165,6 +165,85 @@ class TestCodexBusy:
         assert row["finish_reason"] is None
 
 
+class TestCodexRobustness:
+    """传感器自身健壮性（2026-09-29 审计：单进程双线程并发 + 头部竞态）。"""
+
+    def test_concurrent_catalog_reads(self, tmp_path, monkeypatch):
+        """引擎线程 + UI 线程同时调用：临时文件必须线程级隔离，互不踩踏。"""
+        import sqlite3 as sq
+        import threading
+        import time as _t
+
+        import arm.sensors.codex_transcript as tr
+
+        sql_dir = tmp_path / "sqlite"
+        sql_dir.mkdir()
+        db = sql_dir / "codex-dev.db"
+        conn = sq.connect(db)
+        conn.execute(
+            "CREATE TABLE local_thread_catalog (thread_id TEXT,"
+            " display_title TEXT, source_updated_at REAL, cwd TEXT,"
+            " source_kind TEXT, git_branch TEXT)")
+        conn.execute("INSERT INTO local_thread_catalog VALUES"
+                     " ('t1','任务一',?,NULL,'vscode',NULL)", (_t.time(),))
+        conn.commit()
+        conn.close()
+        (sql_dir / "codex-dev.db-wal").write_bytes(b"")  # 读取键需要 wal 存在
+        # sessions_root 语义是 <base>/sessions，读取器取 .parent 找 sqlite/
+        monkeypatch.setattr(tr, "sessions_root", lambda: tmp_path / "sessions")
+        tr._catalog_cache.clear()
+        tr._timeline_cache.clear()
+
+        errors = []
+        seen = []
+
+        def worker():
+            for _ in range(30):
+                try:
+                    rows = tr.read_sqlite_catalog()
+                    seen.append([r["thread_id"] for r in rows])
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+        ts = [threading.Thread(target=worker) for _ in range(2)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        assert errors == []
+        assert seen and all(s == ["t1"] for s in seen)
+
+    def test_meta_reread_after_partial_header(self, tmp_path, monkeypatch):
+        """文件刚创建、session_meta 未落盘时读到半行：不得永久缓存，
+        下次扫描必须重读出真实 id（否则会话归属从此错乱）。"""
+        import json as _json
+        import os
+        import time as _t
+
+        import arm.sensors.codex_transcript as tr
+
+        root = tmp_path / "sessions"
+        root.mkdir()
+        f = root / "rollout-2026-09-29T10-00-00-aaaa-bbbb-cccc-dddd-eeee.jsonl"
+        # 第一行不是 meta 也不是 turn_context → _read_meta 标记 _pending
+        f.write_text(_json.dumps({"type": "response_item"}) + "\n",
+                     encoding="utf-8")
+        os.utime(f, (_t.time(),) * 2)  # 新鲜文件（<60s 才触发重读）
+        monkeypatch.setattr(tr, "sessions_root", lambda: tmp_path)
+        tr._meta_cache.clear()
+        tr._tail_cache.clear()
+
+        first = tr.scan_rollouts()[0]
+        assert first["session_id"] == "aaaa-bbbb-cccc-dddd-eeee"  # 文件名 id
+
+        with f.open("a", encoding="utf-8") as fh:  # 头部补全
+            fh.write(_json.dumps({
+                "type": "session_meta",
+                "payload": {"session_id": "real-session-id"}}) + "\n")
+        second = tr.scan_rollouts()[0]
+        assert second["session_id"] == "real-session-id"  # 重读成功
+
+
 class TestNetworkSensor:
     def test_up_and_cache(self, monkeypatch):
         import arm.sensors.network as net

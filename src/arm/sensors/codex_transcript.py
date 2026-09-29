@@ -75,9 +75,14 @@ def _session_id_of(fname: str) -> str:
 
 
 def _read_meta(f: Path) -> dict:
-    """解析 rollout 首行 session_meta（头部不可变，结果进 _meta_cache）。"""
+    """解析 rollout 首行 session_meta（头部不可变，结果进 _meta_cache）。
+
+    ``_pending`` 标记：文件刚创建、session_meta 行还没落盘时置位——
+    调用方不得缓存该结果（2026-09-29 竞态修复：半行 JSON 解析失败若被
+    永久缓存，会话归属将从此错乱）。"""
     info = {"session_id": _session_id_of(f.name),
             "originator": None, "cwd": None}
+    found = False
     try:
         with open(f, encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -91,11 +96,14 @@ def _read_meta(f: Path) -> dict:
                         info["session_id"] = pl["session_id"]
                     info["originator"] = pl.get("originator")
                     info["cwd"] = pl.get("cwd")
+                    found = True
                     break
                 if d.get("type") == "turn_context":
                     break  # meta 不会出现在 turn_context 之后
     except OSError:
         pass
+    if not found:
+        info["_pending"] = True
     return info
 
 
@@ -105,18 +113,24 @@ def scan_rollouts(max_age_s: float = 7 * 86400.0) -> list[dict]:
     返回 [{file, session_id, originator, cwd, mtime}]（mtime 新→旧）。
     """
     out = []
+    now = time.time()
     for f in _iter_rollouts(max_age_s):
         key = str(f)
-        meta = _meta_cache.get(key)
-        if meta is None:
-            meta = _read_meta(f)
-            if len(_meta_cache) > 4096:
-                _meta_cache.pop(next(iter(_meta_cache)))
-            _meta_cache[key] = meta
         try:
             mt = f.stat().st_mtime
         except OSError:
             continue
+        meta = _meta_cache.get(key)
+        if meta is None:
+            meta = _read_meta(f)
+            if meta.pop("_pending", False) and now - mt < 60.0:
+                # 头部未写全（文件刚创建）：不缓存，下次扫描重读
+                out.append({"file": key, **meta, "mtime": mt})
+                continue
+            meta.pop("_pending", None)
+            if len(_meta_cache) > 4096:
+                _meta_cache.pop(next(iter(_meta_cache)))
+            _meta_cache[key] = meta
         out.append({"file": key, **meta, "mtime": mt})
     out.sort(key=lambda x: -x["mtime"])
     return out
@@ -217,6 +231,7 @@ def read_sqlite_catalog() -> list[dict]:
     import shutil
     import sqlite3
     import tempfile
+    import threading
 
     src = sessions_root().parent / "sqlite" / "codex-dev.db"
     if not src.exists():
@@ -229,7 +244,10 @@ def read_sqlite_catalog() -> list[dict]:
     cached = _catalog_cache.get(key)
     if cached is not None:
         return cached
-    tmp = Path(tempfile.gettempdir()) / f"arm_codex_ro_{os.getpid()}.db"
+    # 临时名含线程 id：单进程双线程（引擎+UI）并发失效时会同时走到这里，
+    # 同名临时文件互相踩踏会让传感器瞬间致盲（2026-09-29 并发修复）
+    tmp = (Path(tempfile.gettempdir())
+           / f"arm_codex_ro_{os.getpid()}_{threading.get_ident()}.db")
     try:
         shutil.copy2(src, tmp)
         for ext in ("-wal", "-shm"):
@@ -281,6 +299,7 @@ def read_sqlite_timeline() -> dict[str, dict]:
     import shutil
     import sqlite3
     import tempfile
+    import threading
 
     src = sessions_root().parent / "sqlite" / "codex-dev.db"
     if not src.exists():
@@ -294,7 +313,9 @@ def read_sqlite_timeline() -> dict[str, dict]:
     if cached is not None:
         return cached
 
-    tmp = Path(tempfile.gettempdir()) / f"arm_codex_timeline_{os.getpid()}.db"
+    # 同 read_sqlite_catalog：临时名含线程 id，防双线程踩踏
+    tmp = (Path(tempfile.gettempdir())
+           / f"arm_codex_timeline_{os.getpid()}_{threading.get_ident()}.db")
     try:
         shutil.copy2(src, tmp)
         for ext in ("-wal", "-shm"):

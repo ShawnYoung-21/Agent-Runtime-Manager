@@ -74,6 +74,14 @@ class TrayApp:
             busy = [x for x in busy_sessions() if x["busy"]]
         except Exception:
             busy = []
+        try:
+            # Codex 任务并入计数（2026-09-29：此前只数 Claude，Codex 跑任务
+            # 时托盘显示"0 个任务运行中"）
+            from arm.sensors.codex_transcript import busy_codex_sessions
+
+            busy += [x for x in busy_codex_sessions() if x["busy"]]
+        except Exception:
+            pass
         return {
             "state": eff["state"],
             "stale": eff["stale"],
