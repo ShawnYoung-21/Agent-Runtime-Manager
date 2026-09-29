@@ -23,6 +23,8 @@
 | 保护状态卡死（硬杀后假 PROTECTING） | 读取侧 | 心跳过期自动判 DISARMED（stale 显示） | 30s 无心跳 | store.py `get_effective_protection` |
 | 跨进程状态分叉（UI/CLI vs 引擎） | 引擎 `_sync_with_store` | 库是唯一事实源，采纳外部 arm/release | 每拍 | runtime.py |
 | **多引擎双持锁**（2026-09-28 事故根因） | 单实例锁 `use_last_error=True` | windll 直调 GetLastError 会被 ctypes 冲掉错误码→双引擎互搏→电源快照被"钉到一半"的值覆盖。已根治，勿改回 | 每次加锁 | core/single_instance.py |
+| **Codex 应用在线但任务已结束** | `busy_codex_sessions` 会话级证据 | 优先级：**热 rollout（mtime<90s，秒级实时的会话直写日志）> catalog 自身静默 > timeline 终态强制熄灯**。禁用全局 WAL/常驻进程归因。防回归四件套：热 rollout 覆盖 catalog 判闲（长任务 catalog 可十几分钟不刷）、临时文件线程级隔离、rollout 头部竞态重读、并发双线程测试 | 90s 静默 | sensors/codex_transcript.py |
+| **合盖后 Codex 显示等待网络** | network sensor | UI/日志提示网络不可用；真实 busy 任务继续保护，网络抖动不触发释放 | 5s 缓存 / 60s 日志节流 | sensors/network.py + runtime.py |
 
 ## 二、进程模型（单进程 + OS 级看门狗）
 
@@ -83,6 +85,20 @@ app 硬死 = 引擎同死，进程内互护（_app_watchdog/_ensure_daemon）全
 8. 启动布防尊重用户：上次是 "user release" → 本次启动保持未布防，手动开启即可
 9. 测试纪律：引擎测试必须 mock 电源策略与 transcript 扫描
    （否则 pytest 会真钉真机电源、真拉起 app——2026-09-28 基线跑分实测发生过）
+10. **Codex/ChatGPT 桌面应用常驻不等于任务活跃**：`ChatGPT.exe`、`codex.exe app-server` 与
+    `logs_2.sqlite-wal` 会在任务结束、后台重连或其它连接存在时继续运行/刷新。全局 WAL 只能作诊断，
+    禁止再用“最新目录项”方式归因给某个会话；任务忙闲必须用会话级 timeline/rollout 或自身静默。
+11. 合盖后出现 `Reconnecting... waiting for network` 属于 Codex 自身网络/连接链路状态。ARM 可检测并提示，
+    但不能替应用重建远端连接；网络 down 时不会撤销真实任务保护。
+12. **AX211 电池省电模式是合盖断网的首要嫌疑（2026-09-29 调研定级）**：本机实测
+    无线适配器省电模式 AC=最高性能(0)、DC=中等省电(2)——合盖+电池正是 DC 路径。
+    Intel 官方说明"允许计算机关闭此设备"复选框**不**控制 Wi-Fi 正常省电（社区偏方无效），
+    真正的单变量实验是 DC 改最高性能（GUID 19cbb8fa…/12bbebe6…，改动须先登记台账）。
+    详见 `docs/ARM_Modern_Standby_Research_Q1-Q4_Report.md`（已核验 GUID）与 Codex issue #45099。
+13. **本机永不自动入睡（2026-09-29 实测定论）**：原始配置合盖动作=不动作、睡眠超时=永不(AC/DC)、
+    休眠超时=永不——系统自身不会进入 Modern Standby。因此"任务结束释放后系统睡掉导致桌面端
+    重连"的路径在本机**不成立**；合盖掉网（Reconnecting）必发生在系统醒着期间，排查聚焦
+    网卡驱动省电 / 路由器踢空闲客户端 / 本地网络栈，不要往睡眠路径上找。
 
 ## 六、ARM-Watchdog 注册（管理员 PowerShell，一次性）
 

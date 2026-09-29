@@ -98,7 +98,8 @@ arm app（单进程，日常形态）
 
 ## 八、已知的边界与后续方向（仅记录，勿主动开工）
 
-- Codex 深链（codex://）官方未开放会话路由——已预留逻辑，等开放即接入；桌面端跳转已按用户决策移除（独立 APP 点开即达）。
+- **Codex/ChatGPT 桌面应用常驻不等于任务活跃（2026-09-28 修正）**：`ChatGPT.exe`、`codex.exe app-server` 以及全局 `logs_2.sqlite-wal` 会在任务结束、后台重连或其它连接存在时继续运行/刷新，不能再以进程存在或全局 WAL mtime 推断某个会话 busy。`sensors/codex_transcript.py` 现在优先读 `thread_timeline_ledger` 会话终态，缺少终态时仅按该 thread 自身 `source_updated_at` 静默阈值判定。
+- **合盖后的 `Reconnecting... waiting for network` 是独立网络边界**：ARM 通过 `sensors/network.py` 做短缓存探测并在 UI/日志提示，网络断开时不撤销真实任务保护；ARM 不替 Codex 重建远端连接。
 - "继续会话"按钮只对 CLI 会话显示；桌面端会话显示"打开桌面端即见"。云端会话（session_/cse_ 前缀）不能本地 resume。
 - Polish_Blueprint 剩余可选项：网络感知 T8（断网告警）、心跳历史图、config.toml、首启引导、主题切换。
 - exe 图标定制需 rcedit 改 arm.exe 资源（pywebview 无 icon 参数）。

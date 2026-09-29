@@ -32,6 +32,7 @@ from typing import Optional
 _meta_cache: dict[str, dict] = {}
 _tail_cache: dict[str, tuple[float, list]] = {}
 _catalog_cache: dict[tuple, list] = {}
+_timeline_cache: dict[tuple, dict[str, dict]] = {}
 _result_cache: dict = {"key": None, "at": 0.0, "data": []}
 
 
@@ -74,9 +75,14 @@ def _session_id_of(fname: str) -> str:
 
 
 def _read_meta(f: Path) -> dict:
-    """解析 rollout 首行 session_meta（头部不可变，结果进 _meta_cache）。"""
+    """解析 rollout 首行 session_meta（头部不可变，结果进 _meta_cache）。
+
+    ``_pending`` 标记：文件刚创建、session_meta 行还没落盘时置位——
+    调用方不得缓存该结果（2026-09-29 竞态修复：半行 JSON 解析失败若被
+    永久缓存，会话归属将从此错乱）。"""
     info = {"session_id": _session_id_of(f.name),
             "originator": None, "cwd": None}
+    found = False
     try:
         with open(f, encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -90,11 +96,14 @@ def _read_meta(f: Path) -> dict:
                         info["session_id"] = pl["session_id"]
                     info["originator"] = pl.get("originator")
                     info["cwd"] = pl.get("cwd")
+                    found = True
                     break
                 if d.get("type") == "turn_context":
                     break  # meta 不会出现在 turn_context 之后
     except OSError:
         pass
+    if not found:
+        info["_pending"] = True
     return info
 
 
@@ -104,18 +113,24 @@ def scan_rollouts(max_age_s: float = 7 * 86400.0) -> list[dict]:
     返回 [{file, session_id, originator, cwd, mtime}]（mtime 新→旧）。
     """
     out = []
+    now = time.time()
     for f in _iter_rollouts(max_age_s):
         key = str(f)
-        meta = _meta_cache.get(key)
-        if meta is None:
-            meta = _read_meta(f)
-            if len(_meta_cache) > 4096:
-                _meta_cache.pop(next(iter(_meta_cache)))
-            _meta_cache[key] = meta
         try:
             mt = f.stat().st_mtime
         except OSError:
             continue
+        meta = _meta_cache.get(key)
+        if meta is None:
+            meta = _read_meta(f)
+            if meta.pop("_pending", False) and now - mt < 60.0:
+                # 头部未写全（文件刚创建）：不缓存，下次扫描重读
+                out.append({"file": key, **meta, "mtime": mt})
+                continue
+            meta.pop("_pending", None)
+            if len(_meta_cache) > 4096:
+                _meta_cache.pop(next(iter(_meta_cache)))
+            _meta_cache[key] = meta
         out.append({"file": key, **meta, "mtime": mt})
     out.sort(key=lambda x: -x["mtime"])
     return out
@@ -163,14 +178,23 @@ def _tail_events(path: Path, mtime: float, tail_bytes: int = 65536) -> list[tupl
     return events
 
 
+OPEN_TURN_CAP_S = 1800.0  # 回合打开（执行中/等待批准）的最长活跃窗口，防孤儿轮泄漏
+
+
 def codex_busy_state(rollout_file: str,
                      finish_silence_s: float = 90.0,
                      now: Optional[float] = None,
-                     mtime: Optional[float] = None) -> Optional[dict]:
-    """判定某 rollout 的忙闲（task_started/task_complete 轮次边界 + 静默阈值）。
+                     mtime: Optional[float] = None,
+                     open_turn_cap_s: float = OPEN_TURN_CAP_S) -> Optional[dict]:
+    """判定某 rollout 的忙闲（turn 边界 + 静默阈值，2026-09-29 升级）。
 
-    统一规则：静默 < finish_silence_s → BUSY（孤儿轮/完成态都靠时间兜底，
-    教训：进程被杀会留下 task_started 无 complete 的孤儿轮，静默 6 天的都有）。
+    实测依据：完成任务末尾有 event_msg/task_complete；执行中/等待批准的
+    回合只有 task_started 无 complete（请求批准期间零写入，纯静默判定会
+    把"等你批"误判成结束）。规则：
+      - 最后边界是 task_complete → 显式完成，立即非 busy（比静默等待更快释放）
+      - 回合打开（started 无 complete）→ busy，窗口 open_turn_cap_s 内有效
+        （等待批准也算任务没完；孤儿轮被窗口兜底，不会永久亮灯）
+      - 无边界标记的旧格式 → 退回纯静默规则
     """
     f = Path(rollout_file)
     now = time.time() if now is None else now
@@ -182,6 +206,20 @@ def codex_busy_state(rollout_file: str,
     if not events:
         return None
     silence = max(0.0, now - mt)
+
+    def _last_boundary(pt: str) -> Optional[float]:
+        ts = None
+        for _t, payload_t, epoch in events:
+            if payload_t == pt and (ts is None or epoch > ts):
+                ts = epoch
+        return ts
+
+    started, complete = _last_boundary("task_started"), _last_boundary("task_complete")
+    if complete is not None and (started is None or complete >= started):
+        return {"busy": False, "silence_s": round(silence, 1), "turn": "complete"}
+    if started is not None:
+        return {"busy": silence < open_turn_cap_s, "silence_s": round(silence, 1),
+                "turn": "open"}
     return {"busy": silence < finish_silence_s, "silence_s": round(silence, 1)}
 
 
@@ -206,6 +244,67 @@ def runtime_activity_age() -> Optional[float]:
     return max(0.0, time.time() - newest)
 
 
+_turn_cache: dict[str, object] = {"at": 0.0, "data": None}
+
+
+def read_runtime_turn_activity(max_age_s: float = 180.0) -> dict[str, float]:
+    """读 ~/.codex/logs_2.sqlite 最近的 turn 执行跨度 → {thread_id: 最近活动 epoch}。
+
+    第三路独立证据（2026-09-29）：任务执行时 logs_2 秒级流式出现
+    ``session_task.turn`` 跨度行（带 thread_id=uuid），空闲即消失——
+    与 rollout 文件、catalog 心跳互不依赖，防任一单点失效。
+    只读连接（WAL 并发读安全，logs_2 大，不做复制）；失败返回上次缓存或 {}。
+    """
+    import re
+    import sqlite3
+
+    p = sessions_root().parent / "logs_2.sqlite"
+    if not p.exists():
+        return {}
+    now = time.time()
+    cached = _turn_cache.get("data")
+    if cached is not None and now - float(_turn_cache.get("at", 0.0)) < 2.0:
+        return dict(cached)  # type: ignore[arg-type]
+    out: dict[str, float] = {}
+    pat = re.compile(r"thread_id=([0-9a-fA-F-]{36})")
+    try:
+        conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True,
+                               timeout=1.0)
+        rows = conn.execute(
+            "SELECT ts, feedback_log_body FROM logs ORDER BY id DESC LIMIT 400"
+        ).fetchall()
+        conn.close()
+        for ts, body in rows:
+            if ts < now - max_age_s:
+                break
+            if not body or "session_task.turn" not in body:
+                continue
+            m = pat.search(body)
+            if m:
+                tid = m.group(1).lower()
+                if tid not in out or ts > out[tid]:
+                    out[tid] = float(ts)
+    except Exception:
+        return dict(cached) if isinstance(cached, dict) else {}
+    _turn_cache.update(at=now, data=out)
+    return out
+
+
+def ui_state_activity_age() -> Optional[float]:
+    """~/.codex/.codex-global-state.json 的 mtime 龄期（ChatGPT Work 专属信号）。
+
+    2026-09-29 实测：ChatGPT Work 任务流式执行时该 Electron 状态文件 ~2s 级
+    持续刷新，空闲时静默；而 ChatGPT Work 模式不写 rollout、不产生 turn 跨度、
+    catalog 心跳也不实时——这是它唯一的本地活动痕迹。无法归因到具体会话，
+    作为整机级"桌面端有任务在流式执行"信号使用（见 busy_codex_sessions）。
+    """
+    p = sessions_root().parent / ".codex-global-state.json"
+    try:
+        return max(0.0, time.time() - p.stat().st_mtime)
+    except OSError:
+        return None
+
+
 def read_sqlite_catalog() -> list[dict]:
     """读 ~/.codex/sqlite/codex-dev.db 的 local_thread_catalog（新版桌面/VSCode 会话）。
 
@@ -216,6 +315,7 @@ def read_sqlite_catalog() -> list[dict]:
     import shutil
     import sqlite3
     import tempfile
+    import threading
 
     src = sessions_root().parent / "sqlite" / "codex-dev.db"
     if not src.exists():
@@ -228,7 +328,10 @@ def read_sqlite_catalog() -> list[dict]:
     cached = _catalog_cache.get(key)
     if cached is not None:
         return cached
-    tmp = Path(tempfile.gettempdir()) / f"arm_codex_ro_{os.getpid()}.db"
+    # 临时名含线程 id：单进程双线程（引擎+UI）并发失效时会同时走到这里，
+    # 同名临时文件互相踩踏会让传感器瞬间致盲（2026-09-29 并发修复）
+    tmp = (Path(tempfile.gettempdir())
+           / f"arm_codex_ro_{os.getpid()}_{threading.get_ident()}.db")
     try:
         shutil.copy2(src, tmp)
         for ext in ("-wal", "-shm"):
@@ -270,11 +373,94 @@ def read_sqlite_catalog() -> list[dict]:
                 pass
 
 
+def read_sqlite_timeline() -> dict[str, dict]:
+    """读取 Codex thread_timeline_ledger 的最新会话级状态。
+
+    这是只读旁路：复制 db 与 WAL 后查询，避免占用 Codex 的写连接。返回值按
+    thread_id 聚合为 ``{"state": ..., "ts": ..., "reason": ...}``；旧版数据库、
+    WAL 不完整或单条 JSON 损坏时安全降级为空，不把全局 app-server 活动归因给会话。
+    """
+    import shutil
+    import sqlite3
+    import tempfile
+    import threading
+
+    src = sessions_root().parent / "sqlite" / "codex-dev.db"
+    if not src.exists():
+        return {}
+    try:
+        key = (src.stat().st_mtime,
+               src.with_name(src.name + "-wal").stat().st_mtime)
+    except OSError:
+        return {}
+    cached = _timeline_cache.get(key)
+    if cached is not None:
+        return cached
+
+    # 同 read_sqlite_catalog：临时名含线程 id，防双线程踩踏
+    tmp = (Path(tempfile.gettempdir())
+           / f"arm_codex_timeline_{os.getpid()}_{threading.get_ident()}.db")
+    try:
+        shutil.copy2(src, tmp)
+        for ext in ("-wal", "-shm"):
+            try:
+                shutil.copy2(src.with_name(src.name + ext), Path(str(tmp) + ext))
+            except OSError:
+                pass
+        conn = sqlite3.connect(str(tmp))
+        rows = conn.execute(
+            "SELECT thread_id, sequence, payload_json FROM thread_timeline_ledger"
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return {}
+    finally:
+        for ext in ("", "-wal", "-shm"):
+            try:
+                Path(str(tmp) + ext).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    out: dict[str, dict] = {}
+    for thread_id, sequence, raw in rows:
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        sid = thread_id
+        session_sid = payload.get("sessionId")
+        if not sid and not session_sid:
+            continue
+        typ = payload.get("type")
+        status = payload.get("status")
+        state = None
+        reason = None
+        if typ == "session-started":
+            state, reason = "running", "session-started"
+        elif typ == "voice-work-claimed":
+            state, reason = "running", "claimed"
+        elif typ == "session-ended":
+            state, reason = "finished", payload.get("outcome") or "session-ended"
+        elif typ == "voice-work-terminal" and status in ("completed", "interrupted"):
+            state, reason = "finished", status
+        if state is None:
+            continue
+        old = out.get(sid)
+        if old is None or sequence >= old["sequence"]:
+            item = {"state": state, "sequence": sequence, "reason": reason}
+            out[sid] = item
+            if session_sid:
+                out[session_sid] = item
+    if len(_timeline_cache) > 8:
+        _timeline_cache.pop(next(iter(_timeline_cache)))
+    _timeline_cache[key] = out
+    return out
 def busy_codex_sessions(finish_silence_s: float = 90.0,
-                        max_age_s: float = 7 * 86400.0) -> list[dict]:
+                        max_age_s: float = 7 * 86400.0,
+                        open_turn_cap_s: float = OPEN_TURN_CAP_S) -> list[dict]:
     """所有近期 Codex 会话（双源合并，busy 在前）。供引擎/UI。
 
-    源 A（sqlite catalog）：运行时 WAL 活跃且为最近目录项 → BUSY
+    源 A（sqlite catalog/timeline）：终态优先；进行中事件须同时满足会话自身静默阈值
     源 B（rollout jsonl）：静默阈值（冷文件按 mtime 直接短路，不读尾）
     结果 2.5s TTL 缓存：引擎与 UI 的双调用共享一次真实扫描。
     调用方契约：只读返回的 dict（勿原地修改，缓存共享）。
@@ -288,35 +474,59 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
     out: dict[str, dict] = {}
 
     # 源 A：sqlite 目录（新版桌面/VSCode）
-    # 忙闲三信号：
-    #   a. catalog.source_updated_at（低频心跳，分钟级）< 180s
-    #   b. WAL mtime（实时写入，任务跑时秒级刷新）< 90s → 有 Codex 任务在写库
-    #   b 为真时，把"最近更新的会话"视为 BUSY（WAL 不区分是哪个会话写的，
-    #   但最近更新的目录项几乎必然就是活跃会话——保守多亮灯）
+    # 判定优先级（2026-09-29 定版）：热 rollout > catalog 自身静默 > timeline 终态
+    # > runtime turn 跨度（第三路独立证据，防 rollout/catalog 单点失效）。
+    # 全局 WAL/常驻进程不得归因给具体会话。
+    timeline = read_sqlite_timeline()
+    turns = read_runtime_turn_activity()
     rt_age = runtime_activity_age()
-    rt_live = rt_age is not None and rt_age < finish_silence_s
-
-    # catalog 只作会话归属（分钟级心跳不足以判忙闲）
     cat_rows = read_sqlite_catalog()
-    for idx, r in enumerate(cat_rows):
+    for r in cat_rows:
         ts = r.get("source_updated_at") or 0
         silence = max(0.0, now - ts)
-        # 显示用"最后活动"：catalog 心跳是分钟级滞后，运行时 WAL 才是秒级实时——
-        # 忙碌归因本就依赖 WAL，显示口径与归因保持一致（取两者较新的活动），
-        # 否则任务跑着 UI 却显示"20 分钟前活动"（2026-09-28 用户实测反馈）
-        display_silence = min(silence, rt_age) if rt_age is not None else silence
-        # 忙 = 运行时 WAL 活跃 且 该会话是最近目录项（WAL 不区分会话，最近项即活跃项）
-        busy = rt_live and idx == 0
-        out[r["thread_id"]] = {
-            "session_id": r["thread_id"],
+        tid = r["thread_id"]
+        terminal = timeline.get(tid)
+        if terminal is not None and terminal.get("state") == "finished":
+            busy = False
+            activity_source = "timeline"
+            finish_reason = terminal.get("reason")
+        else:
+            busy = silence < finish_silence_s
+            activity_source = "catalog"
+            finish_reason = None if busy else "source_updated_at 静默超时"
+        turn_ts = turns.get(tid)
+        if turn_ts is not None and (now - turn_ts) < finish_silence_s:
+            # turn 跨度在窗口内 = 任务此刻真在执行（覆盖 timeline 终态与 catalog 判闲：
+            # 终态后新回合、catalog 轮次边界心跳失灵，都以实时跨度为准——宁误保护）
+            busy = True
+            silence = min(silence, now - turn_ts)
+            activity_source = "runtime_turn"
+            finish_reason = None
+        out[tid] = {
+            "session_id": tid,
             "title": r.get("title"),
             "cwd": r.get("cwd"),
             "source_kind": r.get("source_kind"),
             "git_branch": r.get("git_branch"),
             "busy": busy,
-            "silence_s": round(display_silence, 1),
-            "runtime_age_s": round(rt_age, 1) if rt_age is not None else None,
+            "silence_s": round(silence, 1),
             "last_activity": ts,
+            "activity_source": activity_source,
+            "finish_reason": finish_reason,
+            "runtime_age_s": round(rt_age, 1) if rt_age is not None else None,
+            "src": "sqlite",
+        }
+    # turn 跨度里出现、catalog 却没有的线程：补最小 busy 条目（宁可误保护）
+    for tid, t_ts in turns.items():
+        if tid in out or (now - t_ts) >= finish_silence_s:
+            continue
+        out[tid] = {
+            "session_id": tid, "title": None, "cwd": None,
+            "source_kind": None, "git_branch": None,
+            "busy": True, "silence_s": round(now - t_ts, 1),
+            "last_activity": t_ts, "activity_source": "runtime_turn",
+            "finish_reason": None,
+            "runtime_age_s": round(rt_age, 1) if rt_age is not None else None,
             "src": "sqlite",
         }
 
@@ -324,24 +534,64 @@ def busy_codex_sessions(finish_silence_s: float = 90.0,
     rollout_by_sid = {}
     for info in scan_rollouts(max_age_s):
         rollout_by_sid[info["session_id"]] = info
-        if info["session_id"] in out:
-            continue
         mtime_age = max(0.0, now - info["mtime"])
-        if mtime_age >= finish_silence_s:
-            # 冷文件短路：末次写入已超静默阈值，末条事件必然更早 → 直接非 busy
-            st = {"busy": False, "silence_s": round(mtime_age, 1)}
-        else:
+        # 判定：mtime<90 热写即活跃；<30min 交给 turn 边界（等待批准的回合
+        # 零写入也要亮灯）；完成态显式熄灯；更冷直接短路
+        st: Optional[dict]
+        if mtime_age < open_turn_cap_s:
             st = codex_busy_state(info["file"], finish_silence_s=finish_silence_s,
-                                  now=now, mtime=info["mtime"])
-            if st is None:
+                                  now=now, mtime=info["mtime"],
+                                  open_turn_cap_s=open_turn_cap_s)
+        else:
+            st = {"busy": False, "silence_s": round(mtime_age, 1)}
+        if st is None:  # 文件读不到：热写兜底为活跃，冷文件视为结束
+            st = {"busy": mtime_age < finish_silence_s,
+                  "silence_s": round(mtime_age, 1)}
+        turn = st.pop("turn", None)  # 先取键再分支，勿提前 pop（complete 判断要用）
+        if turn == "open":
+            st["activity_source"] = "turn_open"
+        existing = out.get(info["session_id"])
+        if existing is not None:
+            # 完成事件是强证据：task_complete 立即熄灯（catalog 恰在完成时
+            # 刷新带来的 90s 假忙让位）；但不得覆盖更新的 runtime_turn 信号
+            if turn == "complete":
+                if existing["busy"] and existing.get("activity_source") != "runtime_turn":
+                    existing.update(busy=False, finish_reason="task_complete")
                 continue
+            # rollout 忙（含等待批准的打开回合）覆盖 catalog 判闲——宁可误保护；
+            # 2026-09-29 实测：长任务 catalog 心跳可十几分钟不刷，等待批准零写入
+            if st["busy"] and not existing["busy"]:
+                existing.update(busy=True, silence_s=st["silence_s"],
+                                last_activity=info["mtime"],
+                                activity_source=st.get("activity_source", "rollout"),
+                                finish_reason=None)
+            elif st["busy"]:
+                existing["silence_s"] = min(existing["silence_s"], st["silence_s"])
+            continue
         out[info["session_id"]] = {
             "session_id": info["session_id"],
             "originator": info["originator"],
             "cwd": info["cwd"],
             "last_activity": info["mtime"],
+            "activity_source": st.get("activity_source", "rollout"),
             **st,
             "src": "rollout",
+        }
+
+    # 源 C：ChatGPT Work 流式活动（第四路，无法归因到线程 → 整机级合成条目）
+    # 仅在没有任何会话级 busy 时补充，避免与其他证据重复亮灯。
+    ui_age = ui_state_activity_age()
+    if (ui_age is not None and ui_age < finish_silence_s
+            and not any(x["busy"] for x in out.values())):
+        out["ui-chatgpt-work"] = {
+            "session_id": "ui-chatgpt-work",
+            "title": "ChatGPT 桌面端（任务流式进行中）",
+            "cwd": None, "source_kind": None, "git_branch": None,
+            "busy": True, "silence_s": round(ui_age, 1),
+            "last_activity": now - ui_age,
+            "activity_source": "ui_state", "finish_reason": None,
+            "runtime_age_s": round(rt_age, 1) if rt_age is not None else None,
+            "src": "ui",
         }
 
     # origin 判定（四类体系）：desktop / cli

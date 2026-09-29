@@ -49,4 +49,22 @@ def detect_codex_processes() -> list[dict]:
 
 
 def codex_running() -> bool:
+    """Codex 应用/CLI 是否存在（诊断用，不等价于任务活跃）。"""
     return bool(detect_codex_processes())
+
+
+def codex_task_process_running() -> bool:
+    """是否存在可作为任务兜底的 Codex 进程。
+
+    ChatGPT.exe 与 ``codex.exe app-server`` 都是桌面应用常驻组件，窗口开着、
+    后台重连或输出日志时也一直存在，绝不能据此判任务活跃。这里只保留
+    command runner 与非 app-server 的 codex CLI 进程作为保守兜底。
+    """
+    for proc in detect_codex_processes():
+        name = (proc.get("name") or "").lower()
+        cmdline = (proc.get("cmdline") or "").lower()
+        if name == "codex-command-runner.exe":
+            return True
+        if name == "codex.exe" and " app-server" not in f" {cmdline}":
+            return True
+    return False

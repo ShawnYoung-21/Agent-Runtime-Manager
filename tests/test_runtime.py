@@ -41,6 +41,10 @@ def _engine(store, monkeypatch, on_battery=True):
                         guard=g)
     monkeypatch.setattr(runtime.power_sensor, "snapshot",
                         lambda: PowerSnapshot(ac_online=not on_battery, battery_pct=80, charging=False))
+    import arm.sensors.network as _net
+
+    monkeypatch.setattr(_net, "snapshot",
+                        lambda: {"status": "up", "up": True, "reason": "测试"})
     # mock 进程探测：默认无 Claude/Codex 进程与 busy rollout（需要时个别测试再覆盖）
     monkeypatch.setattr(runtime, "_claude_running", lambda: False)
     monkeypatch.setattr(runtime, "_codex_active", lambda: False)
