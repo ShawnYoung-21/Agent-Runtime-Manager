@@ -21,7 +21,7 @@
 ## 常用操作
 
 ```bash
-uv run --with pytest python -m pytest -q   # 全量测试（当前 119，改动后必须全过）
+uv run --with pytest python -m pytest -q   # 全量测试（当前 133，改动后必须全过）
 uv tool install --force .                  # 装全局——务必先停所有 arm 进程（否则 arm.exe 装残）
 arm doctor && arm status                   # 自检 + 状态
 tail ~/.arm/arm.log                        # 排障第一入口
