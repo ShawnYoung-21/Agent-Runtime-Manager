@@ -76,6 +76,27 @@
    每条建议附证据等级。
 5. 中文输出。
 
+## 产出落盘（必须执行）
+
+调研完成后，把完整报告写入以下文件（Markdown 格式，路径含空格，写入时保留原样）：
+
+    C:\Users\yangchaoxin\Desktop\Agent Runtime Manager\.claude\worktrees\magical-blackwell-95d182\docs\ARM_Modern_Standby_Research_Q1-Q4_Report.md
+
+要求：
+
+1. 只创建/覆盖这一个文件，不得改动工作区内任何其他文件。
+2. 报告结构固定为：
+   一、结论摘要（≤500 字）
+   二、Q1：PowerRequestExecutionRequired
+   三、Q2：CONNECTIVITYINSTANDBY
+   四、Q3：AX211 息屏掉线处置
+   五、Q4：Codex 桌面端 Reconnecting
+   六、对 ARM 的落地建议（a/b/c 三条，各附证据等级）
+   七、来源链接汇总
+   八、事实 / 推测 / 未找到公开来源 项清单
+3. 若你的运行环境无法访问该路径，则把完整报告全文放在你的最终回复里输出，
+   并在开头注明"未能写入文件"。
+
 ## 不需要调研（避免发散）
 
 - 不要再解释 Modern Standby 与 S3 的区别、SetThreadExecutionState 基础语义（前提已给）。
@@ -85,6 +106,10 @@
 
 ## 使用说明
 
-1. 复制代码块全文给外部模型。
-2. 若它仍不给链接/证据等级，直接判废，不要人工替它补全。
-3. 结果贴回本会话，我来核对 GUID/API 引用是否与官方原文一致，再决定是否动代码（PowerSetRequest 升级）或登记台账（网卡设置变更属系统级操作，须先登记）。
+1. 复制上面代码块全文给外部模型，并确保它的运行目录/可访问范围包含本工作区
+   （`...\Agent Runtime Manager\.claude\worktrees\magical-blackwell-95d182`），
+   这样它才能按"产出落盘"要求把报告写进 `docs\ARM_Modern_Standby_Research_Q1-Q4_Report.md`。
+2. 它跑完后，直接告诉我"报告写好了"，我从工作区读取该文件开始核对。
+3. 核对要点：GUID/API 引用是否与 Microsoft Learn 原文一致、证据等级是否真实（点开链接抽查）。
+   若它仍不给链接/证据等级，直接判废重跑，不要人工替它补全。
+4. 核对通过后再分两路落地：代码路（PowerSetRequest 升级）与系统路（网卡设置，须先登记台账）。
